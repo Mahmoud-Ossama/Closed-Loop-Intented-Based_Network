@@ -1,0 +1,78 @@
+What we built so far (from the beginning)
+1. ryu_client.py — HTTP client that talks to the Ryu controller. Handles GET (telemetry) and POST (actions) with retry logic and error handling. All other modules use this to communicate with the network.
+
+2. telemetry_parser.py — Takes the raw JSON from ryu_client.get_port_stats() and converts it into structured PortStatistics dataclasses, then builds a normalized 5-element numpy state vector [link1_util, link2_util, link3_util, packet_loss, traffic_load]. This is what the RL agent sees.
+
+3. action_translator.py — Takes an integer action ID (0-4) from the RL agent and converts it into the corresponding Ryu REST API call via ryu_client. Returns an ActionResult with success/failure info.
+
+4. mock_ryu_server.py — Fake Ryu controller running on localhost:8080. Returns randomized but realistic port/flow stats for GET requests and accepts POST actions. Used for testing without a real SDN network.
+
+5. reward.py — Multi-objective reward function with 4 components:
+   R_util     = -mean(utilizations)²           (penalizes high usage)
+   R_loss     = -packet_loss × 100             (heavy penalty for drops)
+   R_balance  = 1/(1+std(utilizations))        (rewards even distribution)
+   R_congestion = -5 if any link > 80%         (congestion penalty)
+   Final reward clipped to [-10, 10].
+
+6. sdn_env.py — Gymnasium environment that wraps the LIVE network. Uses ryu_client + telemetry_parser + action_translator + reward. Each step(): execute action → wait 2s → collect telemetry → compute reward. Requires mock_ryu_server or real Ryu to be running.
+
+7. mock_env.py — Gymnasium environment that simulates the network OFFLINE. No server needed. Simulates:
+   - Congestion that builds when no action is taken
+   - Traffic shifting between links when routing actions are chosen
+   - Rate limiting that reduces/increases overall utilization
+   - Packet loss that correlates with congestion (higher loss when any link > 80%)
+   Used for RL training without any real network or mock server.
+
+
+Data flow so far:
+
+=== LIVE mode (sdn_env.py + mock_ryu_server) ===
+mock_ryu_server (port 8080)
+       ↓ GET /stats/port
+  ryu_client.get_port_stats()
+       ↓ raw JSON
+  telemetry_parser.build_state()
+       ↓ np.array([5])
+  agent decides action_id  ← (not built yet)
+       ↓ int (0-4)
+  action_translator.execute(action_id)
+       ↓ uses ryu_client POST
+  mock_ryu_server receives command
+       ↓ wait 2s (stabilization)
+  reward.compute_reward(state)
+       ↓ float
+
+=== OFFLINE mode (mock_env.py, no server needed) ===
+  mock_env.reset()
+       ↓ random initial state
+  agent decides action_id  ← (not built yet)
+       ↓ int (0-4)
+  mock_env.step(action_id)
+       ↓ simulates traffic + congestion + loss
+  reward.compute_reward(state)
+       ↓ float
+
+
+Files:
+  ai_layer/
+    network_interface/
+      ryu_client.py          — HTTP REST client
+      telemetry_parser.py    — JSON → state vector
+      action_translator.py   — action ID → REST call
+      mock_ryu_server.py     — fake Ryu for testing
+    environments/
+      sdn_env.py             — Gym env (live network)
+      mock_env.py             — Gym env (offline simulation)
+    agent/
+      dqn_agent.py           — (not built yet)
+      replay_buffer.py       — (not built yet)
+    models/
+      q_network.py           — (not built yet)
+    training/
+      trainer.py             — (not built yet)
+    utils/
+      reward.py              — reward function
+      config.py              — (not built yet)
+  clint_test.py              — integration test
+  prod.json                  — all configuration
+  INTEGRATION_NOTES.md       — notes for real Ryu connection
