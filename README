@@ -1,4 +1,3 @@
-What we built so far (from the beginning)
 1. ryu_client.py — HTTP client that talks to the Ryu controller. Handles GET (telemetry) and POST (actions) with retry logic and error handling. All other modules use this to communicate with the network.
 
 2. telemetry_parser.py — Takes the raw JSON from ryu_client.get_port_stats() and converts it into structured PortStatistics dataclasses, then builds a normalized 5-element numpy state vector [link1_util, link2_util, link3_util, packet_loss, traffic_load]. This is what the RL agent sees.
