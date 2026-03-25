@@ -1,138 +1,104 @@
 """
-Telemetry Parser — converts raw Ryu REST responses into a normalized
-5-dimensional RL state vector.
+Telemetry Parser for the updated network model.
 
-State vector layout (all values in [0, 1]):
-    [0] link1_utilization   — port 1 tx_bytes / link_capacity
-    [1] link2_utilization   — port 2 tx_bytes / link_capacity
-    [2] link3_utilization   — port 3 tx_bytes / link_capacity
-    [3] packet_loss_rate    — total dropped / total packets
-    [4] total_traffic_load  — sum of link utilizations (capped at 1.0)
+Builds a normalized 12-dimensional state vector:
+    [0] util_ran_agg
+    [1] util_agg_core
+    [2] util_core_sp1
+    [3] util_core_sp2
+    [4] util_sp1_lf1
+    [5] util_sp2_lf1
+    [6] latency_norm
+    [7] packet_loss_norm
+    [8] traffic_load
+    [9] service_urllc
+    [10] service_embb
+    [11] service_mmtc
 
-Designed to be pluggable: if the Ryu response format changes,
-only the _extract_* helpers need updating.
+Raw telemetry inputs:
+    - GET /links/utilization
+    - GET /latency/{src}/{dst}
 """
 
-from dataclasses import dataclass
 from typing import Dict, List
 
 import numpy as np
 
 
-# ------------------------------------------------------------------ #
-#  Data classes – structured intermediates
-# ------------------------------------------------------------------ #
-
-@dataclass
-class PortStatistics:
-    port_no: int
-    rx_packets: int
-    tx_packets: int
-    rx_bytes: int
-    tx_bytes: int
-    rx_dropped: int
-    tx_dropped: int
-
-
-@dataclass
-class FlowEntry:
-    priority: int
-    match: dict
-    actions: list
-    packet_count: int
-    byte_count: int
-
-
-# ------------------------------------------------------------------ #
-#  Parser
-# ------------------------------------------------------------------ #
-
 class TelemetryParser:
-    """Converts raw Ryu JSON telemetry into RL state vectors."""
+    """Converts updated Ryu JSON telemetry into RL state vectors."""
 
-    def __init__(self, link_capacity_bps: int = 1_000_000, num_ports: int = 3):
+    LINK_ORDER: List[str] = [
+        "RAN -> agg",
+        "agg -> core",
+        "core -> sp1",
+        "core -> sp2",
+        "sp1 -> lf1",
+        "sp2 -> lf1",
+    ]
+
+    def __init__(self, link_capacity_mbps: float = 100.0, latency_cap_ms: float = 200.0):
         """
         Args:
-            link_capacity_bps: Max link bandwidth in bytes/sec (default 1 Mbps).
-            num_ports:         Number of switch ports to track.
+            link_capacity_mbps: Fixed link capacity for utilization normalization.
+            latency_cap_ms: Max latency used for normalization/clipping.
         """
-        # Ryu reports bytes, and link_capacity_bps is in bits.
-        # Convert capacity to bytes/sec for correct utilization ratio.
-        self.link_capacity_bytes = link_capacity_bps / 8
-        self.num_ports = num_ports
+        self.link_capacity_mbps = max(float(link_capacity_mbps), 1e-6)
+        self.latency_cap_ms = max(float(latency_cap_ms), 1e-6)
 
-    # ----- structured parsing ---------------------------------------- #
-
-    def parse_port_stats(self, response: dict, dpid: str) -> Dict[int, PortStatistics]:
-        """Parse raw port stats response into {port_no: PortStatistics}.
-
-        Expected input format (from Ryu ofctl_rest):
-            { "<dpid>": [ {port_no, rx_packets, ...}, ... ] }
-        """
-        port_list = response.get(dpid, [])
-        result = {}
-        for p in port_list:
-            ps = PortStatistics(
-                port_no=p["port_no"],
-                rx_packets=p.get("rx_packets", 0),
-                tx_packets=p.get("tx_packets", 0),
-                rx_bytes=p.get("rx_bytes", 0),
-                tx_bytes=p.get("tx_bytes", 0),
-                rx_dropped=p.get("rx_dropped", 0),
-                tx_dropped=p.get("tx_dropped", 0),
-            )
-            result[ps.port_no] = ps
+    def parse_link_utilization(self, response: dict) -> Dict[str, float]:
+        """Parse /links/utilization into {link_name: tx_mbps}."""
+        links = response.get("links", [])
+        result: Dict[str, float] = {}
+        for item in links:
+            link = item.get("link")
+            tx_mbps = float(item.get("tx_mbps", 0.0))
+            if link:
+                result[link] = tx_mbps
         return result
 
-    def parse_flow_stats(self, response: dict, dpid: str) -> List[FlowEntry]:
-        """Parse raw flow stats response into a list of FlowEntry."""
-        flow_list = response.get(dpid, [])
-        return [
-            FlowEntry(
-                priority=f.get("priority", 0),
-                match=f.get("match", {}),
-                actions=f.get("actions", []),
-                packet_count=f.get("packet_count", 0),
-                byte_count=f.get("byte_count", 0),
-            )
-            for f in flow_list
-        ]
+    def parse_latency(self, response: dict) -> Dict[str, float]:
+        """Parse /latency/{src}/{dst} response into numeric values."""
+        latency_ms = float(response.get("latency_ms", 0.0))
+        # API returns percent; convert to [0,1] fraction.
+        loss_frac = float(response.get("packet_loss_percent", 0.0)) / 100.0
+        return {
+            "latency_ms": latency_ms,
+            "packet_loss": loss_frac,
+        }
 
-    # ----- state vector ---------------------------------------------- #
+    def build_state(
+        self,
+        link_util_response: dict,
+        latency_response: dict,
+        service_type: str,
+    ) -> np.ndarray:
+        """Build the 12-dim normalized state vector.
 
-    def build_state(self, port_stats: Dict[int, PortStatistics]) -> np.ndarray:
-        """Build the 5-dim normalized state vector from parsed port stats.
-
-        Returns:
-            np.ndarray of shape (5,), dtype float32, values clipped to [0, 1].
+        Args:
+            link_util_response: Response from /links/utilization.
+            latency_response: Response from /latency/{src}/{dst}.
+            service_type: One of {"URLLC", "eMBB", "mMTC"}.
         """
-        state = np.zeros(5, dtype=np.float32)
+        state = np.zeros(12, dtype=np.float32)
 
-        # Link utilizations (ports 1-3)
-        for i in range(self.num_ports):
-            port_no = i + 1
-            ps = port_stats.get(port_no)
-            if ps is not None:
-                state[i] = ps.tx_bytes / self.link_capacity_bytes
+        link_map = self.parse_link_utilization(link_util_response)
+        for idx, name in enumerate(self.LINK_ORDER):
+            tx_mbps = link_map.get(name, 0.0)
+            state[idx] = tx_mbps / self.link_capacity_mbps
 
-        # Packet loss rate
-        total_packets = sum(
-            ps.rx_packets + ps.tx_packets for ps in port_stats.values()
-        )
-        total_dropped = sum(
-            ps.rx_dropped + ps.tx_dropped for ps in port_stats.values()
-        )
-        state[3] = total_dropped / max(total_packets, 1)
+        perf = self.parse_latency(latency_response)
+        state[6] = perf["latency_ms"] / self.latency_cap_ms
+        state[7] = perf["packet_loss"]
 
-        # Total traffic load (sum of 3 link utilizations, normalised to 1)
-        raw_load = state[0] + state[1] + state[2]
-        state[4] = raw_load / self.num_ports  # average keeps it in [0,1] range
+        state[8] = float(np.mean(state[:6]))
+
+        service_norm = service_type.strip().lower()
+        if service_norm == "urllc":
+            state[9:12] = [1.0, 0.0, 0.0]
+        elif service_norm == "embb":
+            state[9:12] = [0.0, 1.0, 0.0]
+        elif service_norm == "mmtc":
+            state[9:12] = [0.0, 0.0, 1.0]
 
         return np.clip(state, 0.0, 1.0)
-
-    # ----- convenience: raw response → state in one call ------------- #
-
-    def response_to_state(self, port_response: dict, dpid: str) -> np.ndarray:
-        """Shortcut: raw Ryu port-stats JSON → normalised state vector."""
-        port_stats = self.parse_port_stats(port_response, dpid)
-        return self.build_state(port_stats)

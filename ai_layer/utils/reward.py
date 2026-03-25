@@ -1,50 +1,46 @@
 """
-Reward function for the SDN RL environment.
+Service-aware reward function for the updated SDN state vector.
 
-R = R_util + R_loss + R_balance + R_congestion
-
-Components (from prod.json):
-    R_util      = -mean(u1, u2, u3)²          weight 1.0
-    R_loss      = -packet_loss_rate × 100      weight 100.0
-    R_balance   = 1 / (1 + std(u1, u2, u3))   weight 1.0
-    R_congestion = -5 if any(u) > 0.8 else 0   threshold 0.8
-
-Final reward clipped to [-10, 10].
+State layout:
+    [0:6]  link utilizations
+    [6]    latency_norm
+    [7]    packet_loss
+    [8]    traffic_load
+    [9:12] service one-hot [URLLC, eMBB, mMTC]
 """
 
 import numpy as np
 
 
+def _active_service(state: np.ndarray) -> str:
+    svc = state[9:12]
+    idx = int(np.argmax(svc)) if np.any(svc > 0) else 0
+    return ["URLLC", "eMBB", "mMTC"][idx]
+
+
 def compute_reward(state: np.ndarray, config: dict = None) -> float:
-    """Compute reward from a 5-dim normalised state vector.
+    """Compute service-aware reward from a 12-dim normalized state."""
+    utils = state[:6]
+    latency = float(state[6])
+    loss = float(state[7])
+    traffic = float(state[8])
 
-    Args:
-        state: [link1_util, link2_util, link3_util, packet_loss, traffic_load]
-        config: Optional reward_function config from prod.json.
-                Uses spec defaults if not provided.
-    """
-    u1, u2, u3, loss, _ = state
-
-    # Defaults from spec / prod.json
-    loss_weight = 100.0
-    congestion_threshold = 0.8
-    congestion_penalty = 5.0
     clip_lo, clip_hi = -10.0, 10.0
-
     if config is not None:
-        comps = config.get("components", {})
-        loss_weight = comps.get("packet_loss_penalty", {}).get("weight", loss_weight)
-        congestion_threshold = comps.get("congestion_threshold", {}).get("threshold", congestion_threshold)
-        congestion_penalty = comps.get("congestion_threshold", {}).get("penalty", congestion_penalty)
         clip_lo, clip_hi = config.get("normalization", {}).get("clip_range", [clip_lo, clip_hi])
 
-    utils = np.array([u1, u2, u3])
-    mean_util = utils.mean()
+    congestion = float(np.max(utils))
+    balance = float(1.0 / (1.0 + np.std(utils)))
+    service = _active_service(state)
 
-    r_util = -(mean_util ** 2)
-    r_loss = -loss * loss_weight
-    r_balance = 1.0 / (1.0 + utils.std())
-    r_congestion = -congestion_penalty if utils.max() > congestion_threshold else 0.0
+    if service == "URLLC":
+        # Prioritize low latency and low loss.
+        reward = (-2.0 * latency) + (-5.0 * loss) + (-1.0 * congestion)
+    elif service == "eMBB":
+        # Prioritize high throughput while avoiding severe congestion.
+        reward = (+3.0 * traffic) + (-1.0 * congestion) + (-1.0 * loss)
+    else:  # mMTC
+        # Prioritize stability and acceptable loss.
+        reward = (+2.0 * balance) + (-1.0 * loss) + (-0.5 * congestion)
 
-    reward = r_util + r_loss + r_balance + r_congestion
     return float(np.clip(reward, clip_lo, clip_hi))

@@ -1,37 +1,44 @@
-1. ryu_client.py — HTTP client that talks to the Ryu controller. Handles GET (telemetry) and POST (actions) with retry logic and error handling. All other modules use this to communicate with the network.
+1. ryu_client.py — HTTP client that talks to the Ryu controller. Handles GET (telemetry) and POST (actions) with retry logic and error handling. Updated with new telemetry calls:
+   - get_link_utilization() → GET /links/utilization
+   - get_latency(src, dst)  → GET /latency/{src}/{dst}
 
-2. telemetry_parser.py — Takes the raw JSON from ryu_client.get_port_stats() and converts it into structured PortStatistics dataclasses, then builds a normalized 5-element numpy state vector [link1_util, link2_util, link3_util, packet_loss, traffic_load]. This is what the RL agent sees.
+2. telemetry_parser.py — Takes raw JSON from the new telemetry endpoints and builds a normalized 12-element numpy state vector:
+   [util_ran_agg, util_agg_core, util_core_sp1, util_core_sp2, util_sp1_lf1, util_sp2_lf1,
+    latency, packet_loss, traffic_load, service_urllc, service_embb, service_mmtc]
+   Utilization is normalized using fixed link capacity = 100 Mbps.
 
 3. action_translator.py — Takes an integer action ID (0-4) from the RL agent and converts it into the corresponding Ryu REST API call via ryu_client. Returns an ActionResult with success/failure info.
+   QoS actions are now assumed to be enforced at the Core switch (configured by switch_dpid).
 
-4. mock_ryu_server.py — Fake Ryu controller running on localhost:8080. Returns randomized but realistic port/flow stats for GET requests and accepts POST actions. Used for testing without a real SDN network.
+4. mock_ryu_server.py — Fake Ryu controller running on localhost:8080. Updated to serve:
+   - /links/utilization (6 monitored links)
+   - /latency/{src}/{dst}
+   Also still accepts POST/PUT actions for control-plane testing.
 
-5. reward.py — Multi-objective reward function with 4 components:
-   R_util     = -mean(utilizations)²           (penalizes high usage)
-   R_loss     = -packet_loss × 100             (heavy penalty for drops)
-   R_balance  = 1/(1+std(utilizations))        (rewards even distribution)
-   R_congestion = -5 if any link > 80%         (congestion penalty)
+5. reward.py — Service-aware reward function using the 12D state:
+   - URLLC: prioritize low latency and low packet loss
+   - eMBB: prioritize throughput (traffic_load) while controlling congestion
+   - mMTC: prioritize stability and lower loss
    Final reward clipped to [-10, 10].
 
-6. sdn_env.py — Gymnasium environment that wraps the LIVE network. Uses ryu_client + telemetry_parser + action_translator + reward. Each step(): execute action → wait 2s → collect telemetry → compute reward. Requires mock_ryu_server or real Ryu to be running.
+6. sdn_env.py — Gymnasium environment that wraps the LIVE network. Uses ryu_client + telemetry_parser + action_translator + reward. Updated observation is 12D. Each step(): execute action → wait 2s → collect /links/utilization and /latency → compute reward.
 
-7. mock_env.py — Gymnasium environment that simulates the network OFFLINE. No server needed. Simulates:
-   - Congestion that builds when no action is taken
-   - Traffic shifting between links when routing actions are chosen
-   - Rate limiting that reduces/increases overall utilization
-   - Packet loss that correlates with congestion (higher loss when any link > 80%)
-   Used for RL training without any real network or mock server.
+7. mock_env.py — Gymnasium environment that simulates the network OFFLINE with the updated topology model. No server needed. Simulates:
+   - 6 link utilizations (main + backup branches)
+   - latency and packet loss dynamics
+   - traffic changes
+   - service one-hot encoding (URLLC/eMBB/mMTC)
 
 
 Data flow so far:
 
 === LIVE mode (sdn_env.py + mock_ryu_server) ===
 mock_ryu_server (port 8080)
-       ↓ GET /stats/port
-  ryu_client.get_port_stats()
+       ↓ GET /links/utilization and GET /latency/{src}/{dst}
+  ryu_client telemetry calls
        ↓ raw JSON
-  telemetry_parser.build_state()
-       ↓ np.array([5])
+  telemetry_parser.build_state(...)
+       ↓ np.array([12])
   agent decides action_id  ← (not built yet)
        ↓ int (0-4)
   action_translator.execute(action_id)
@@ -43,11 +50,11 @@ mock_ryu_server (port 8080)
 
 === OFFLINE mode (mock_env.py, no server needed) ===
   mock_env.reset()
-       ↓ random initial state
+       ↓ random initial state (12D)
   agent decides action_id  ← (not built yet)
        ↓ int (0-4)
   mock_env.step(action_id)
-       ↓ simulates traffic + congestion + loss
+       ↓ simulates link load + latency + loss + service intent
   reward.compute_reward(state)
        ↓ float
 
@@ -55,13 +62,13 @@ mock_ryu_server (port 8080)
 Files:
   ai_layer/
     network_interface/
-      ryu_client.py          — HTTP REST client
-      telemetry_parser.py    — JSON → state vector
-      action_translator.py   — action ID → REST call
-      mock_ryu_server.py     — fake Ryu for testing
+      ryu_client.py          — HTTP REST client (updated telemetry endpoints)
+      telemetry_parser.py    — new telemetry JSON → 12D state vector
+      action_translator.py   — action ID → REST call (Core QoS assumption)
+      mock_ryu_server.py     — fake Ryu for testing (updated APIs)
     environments/
-      sdn_env.py             — Gym env (live network)
-      mock_env.py             — Gym env (offline simulation)
+      sdn_env.py             — Gym env (live network, 12D state)
+      mock_env.py            — Gym env (offline simulation, 12D state)
     agent/
       dqn_agent.py           — (not built yet)
       replay_buffer.py       — (not built yet)
@@ -70,8 +77,8 @@ Files:
     training/
       trainer.py             — (not built yet)
     utils/
-      reward.py              — reward function
+      reward.py              — service-aware reward function
       config.py              — (not built yet)
-  clint_test.py              — integration test
-  prod.json                  — all configuration
+  clint_test.py              — integration test (updated for new telemetry/state)
+  prod.json                  — updated config (100 Mbps, Core switch, 12D state)
   INTEGRATION_NOTES.md       — notes for real Ryu connection

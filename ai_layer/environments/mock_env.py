@@ -1,14 +1,11 @@
 """
-Mock SDN Environment — simulates network states for offline RL training.
+Mock SDN Environment for offline training with the updated 12-feature state.
 
-Mimics the same Gymnasium interface as SDNEnv (observation_space, action_space)
-but requires NO network, NO Ryu controller, NO mock server.
-
-Simulated dynamics:
-    - Congestion builds over time if no action is taken
-    - Actions shift utilizations across links
-    - Packet loss correlates with congestion
-    - Random traffic fluctuations each step
+Simulates:
+    - 6 link utilizations across main/backup paths
+    - latency and packet loss dynamics
+    - traffic load fluctuations
+    - service-aware one-hot encoding (URLLC/eMBB/mMTC)
 """
 
 import gymnasium as gym
@@ -19,7 +16,7 @@ from ai_layer.utils.reward import compute_reward
 
 
 class MockSDNEnv(gym.Env):
-    """Offline simulated SDN environment for training / testing."""
+    """Offline simulated SDN environment for training/testing."""
 
     metadata = {"render_modes": ["human"]}
 
@@ -28,114 +25,114 @@ class MockSDNEnv(gym.Env):
 
         self.config = config
         env_cfg = config["environment"]
+        mon_cfg = env_cfg.get("monitoring", {})
 
         self.max_steps = env_cfg["episode"]["max_steps"]
         self.reward_cfg = config.get("reward_function", None)
+        self.active_service = mon_cfg.get("active_service", "URLLC")
 
-        # Gym spaces — identical to SDNEnv
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(5,), dtype=np.float32
+            low=0.0, high=1.0, shape=(12,), dtype=np.float32
         )
         self.action_space = spaces.Discrete(5)
 
-        # Internal simulation state
-        self._utils = np.zeros(3, dtype=np.float32)  # link utilizations
+        self._utils = np.zeros(6, dtype=np.float32)
+        self._lat = 0.0
         self._loss = 0.0
         self._current_step = 0
         self._rng = np.random.default_rng()
-
-    # ------------------------------------------------------------------ #
-    #  Gym interface
-    # ------------------------------------------------------------------ #
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._rng = np.random.default_rng(seed)
         self._current_step = 0
 
-        # Start with moderate random utilizations
-        self._utils = self._rng.uniform(0.1, 0.5, size=3).astype(np.float32)
-        self._loss = self._rng.uniform(0.0, 0.01)
+        if options and "service_type" in options:
+            self.active_service = str(options["service_type"])
 
-        return self._build_state(), {}
+        self._utils = self._rng.uniform(0.10, 0.55, size=6).astype(np.float32)
+        self._lat = float(self._rng.uniform(0.02, 0.20))
+        self._loss = float(self._rng.uniform(0.0, 0.03))
+
+        return self._build_state(), {"service_type": self.active_service}
 
     def step(self, action: int):
         self._current_step += 1
 
-        # 1. Apply action effects
         self._apply_action(action)
-
-        # 2. Simulate traffic dynamics
         self._simulate_traffic()
 
-        # 3. Build state and compute reward
         state = self._build_state()
         reward = compute_reward(state, self.reward_cfg)
 
         terminated = False
         truncated = self._current_step >= self.max_steps
-
-        return state, reward, terminated, truncated, {}
+        return state, reward, terminated, truncated, {"service_type": self.active_service}
 
     def render(self):
         s = self._build_state()
-        labels = ["link1_util", "link2_util", "link3_util", "pkt_loss", "traffic"]
+        labels = [
+            "u_ran_agg", "u_agg_core", "u_core_sp1", "u_core_sp2",
+            "u_sp1_lf1", "u_sp2_lf1", "lat", "loss", "traffic",
+            "svc_u", "svc_e", "svc_m",
+        ]
         parts = " | ".join(f"{l}={v:.3f}" for l, v in zip(labels, s))
         print(f"[Step {self._current_step:3d}] {parts}")
 
-    # ------------------------------------------------------------------ #
-    #  Simulation logic
-    # ------------------------------------------------------------------ #
-
     def _apply_action(self, action: int):
-        """Simulate the effect of each action on link utilizations."""
         if action == 0:
-            # do_nothing — congestion drifts up slightly
-            self._utils += self._rng.uniform(0.01, 0.05, size=3)
+            self._utils += self._rng.uniform(0.00, 0.03, size=6)
 
         elif action == 1:
-            # route_to_queue_0 — shift traffic toward link 1
-            self._utils[0] += self._rng.uniform(0.05, 0.15)
-            self._utils[1] -= self._rng.uniform(0.02, 0.10)
-            self._utils[2] -= self._rng.uniform(0.02, 0.10)
+            # Favor main path (sp1 branch)
+            self._utils[2] += self._rng.uniform(0.05, 0.12)
+            self._utils[4] += self._rng.uniform(0.05, 0.12)
+            self._utils[3] -= self._rng.uniform(0.03, 0.10)
+            self._utils[5] -= self._rng.uniform(0.03, 0.10)
 
         elif action == 2:
-            # route_to_queue_1 — shift traffic toward link 2
-            self._utils[0] -= self._rng.uniform(0.02, 0.10)
-            self._utils[1] += self._rng.uniform(0.05, 0.15)
-            self._utils[2] -= self._rng.uniform(0.02, 0.10)
+            # Favor backup path (sp2 branch)
+            self._utils[3] += self._rng.uniform(0.05, 0.12)
+            self._utils[5] += self._rng.uniform(0.05, 0.12)
+            self._utils[2] -= self._rng.uniform(0.03, 0.10)
+            self._utils[4] -= self._rng.uniform(0.03, 0.10)
 
         elif action == 3:
-            # apply_rate_limit — reduce overall utilization
-            self._utils *= self._rng.uniform(0.7, 0.9)
+            # Apply stricter shaping at Core
+            self._utils *= self._rng.uniform(0.72, 0.90)
 
         elif action == 4:
-            # remove_rate_limit — utilization rises
-            self._utils *= self._rng.uniform(1.05, 1.2)
+            # Relax shaping
+            self._utils *= self._rng.uniform(1.05, 1.18)
 
     def _simulate_traffic(self):
-        """Add random traffic fluctuations and derive packet loss."""
-        # Random per-link noise
-        noise = self._rng.normal(0.0, 0.03, size=3).astype(np.float32)
+        noise = self._rng.normal(0.0, 0.025, size=6).astype(np.float32)
         self._utils += noise
-
-        # Clamp utilizations to [0, 1]
         self._utils = np.clip(self._utils, 0.0, 1.0)
 
-        # Packet loss = f(congestion): rises sharply when any link > 0.8
-        max_util = self._utils.max()
+        max_util = float(np.max(self._utils))
+        self._lat = float(np.clip(0.04 + 0.6 * max_util + self._rng.normal(0.0, 0.03), 0.0, 1.0))
+
         if max_util > 0.8:
-            self._loss = self._rng.uniform(0.02, 0.08)
-        elif max_util > 0.5:
-            self._loss = self._rng.uniform(0.005, 0.02)
+            self._loss = float(self._rng.uniform(0.03, 0.15))
+        elif max_util > 0.55:
+            self._loss = float(self._rng.uniform(0.01, 0.05))
         else:
-            self._loss = self._rng.uniform(0.0, 0.005)
+            self._loss = float(self._rng.uniform(0.0, 0.015))
 
     def _build_state(self) -> np.ndarray:
-        """Return the 5-dim state vector matching SDNEnv format."""
-        traffic_load = float(self._utils.mean())
-        return np.array(
-            [self._utils[0], self._utils[1], self._utils[2],
-             self._loss, traffic_load],
-            dtype=np.float32,
-        )
+        state = np.zeros(12, dtype=np.float32)
+        state[:6] = self._utils
+        state[6] = self._lat
+        state[7] = self._loss
+        state[8] = float(np.mean(self._utils))
+
+        svc = self.active_service.strip().lower()
+        if svc == "urllc":
+            state[9:12] = [1.0, 0.0, 0.0]
+        elif svc == "embb":
+            state[9:12] = [0.0, 1.0, 0.0]
+        elif svc == "mmtc":
+            state[9:12] = [0.0, 0.0, 1.0]
+
+        return np.clip(state, 0.0, 1.0)

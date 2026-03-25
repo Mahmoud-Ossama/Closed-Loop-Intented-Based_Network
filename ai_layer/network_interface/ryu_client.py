@@ -88,6 +88,14 @@ class RyuClient:
         """GET /qos/queue/{dpid}  →  queue statistics."""
         return self._request("GET", f"/qos/queue/{dpid}")
 
+    def get_link_utilization(self) -> dict:
+        """GET /links/utilization  →  per-link tx_mbps statistics."""
+        return self._request("GET", "/links/utilization")
+
+    def get_latency(self, src: str, dst: str) -> dict:
+        """GET /latency/{src}/{dst}  →  latency/loss for a monitored pair."""
+        return self._request("GET", f"/latency/{src}/{dst}")
+
     # ------------------------------------------------------------------ #
     #  POST endpoints – actions
     # ------------------------------------------------------------------ #
