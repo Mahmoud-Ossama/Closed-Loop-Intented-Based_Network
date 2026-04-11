@@ -292,10 +292,6 @@
     }
   },
   "debugging": {
-    "mock_mode": {
-      "enabled": true, 
-      "description": "Use mock environment for offline training"
-    },
     "verbose_actions": true,
     "log_state_transitions": true,
     "save_failed_requests": true

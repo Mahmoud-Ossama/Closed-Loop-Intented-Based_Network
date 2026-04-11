@@ -9,15 +9,11 @@ import numpy as np
 import torch
 
 from ai_layer.agent.dqn_agent import DQNAgent
-from ai_layer.environments.mock_env import MockSDNEnv
 from ai_layer.environments.sdn_env import SDNEnv
 
 
 def build_environment(config: dict):
-    """Choose mock/live environment based on config debugging flag."""
-    use_mock = config.get("debugging", {}).get("mock_mode", {}).get("enabled", False)
-    if use_mock:
-        return MockSDNEnv(config)
+    """Build the live SDN environment backed by Ryu telemetry/actions."""
     return SDNEnv(config)
 
 

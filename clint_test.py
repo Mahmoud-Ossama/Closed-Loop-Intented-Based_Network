@@ -1,6 +1,5 @@
 import json
 
-from ai_layer.environments.mock_env import MockSDNEnv
 from ai_layer.environments.sdn_env import SDNEnv
 from ai_layer.network_interface.action_translator import ActionTranslator
 from ai_layer.network_interface.ryu_client import RyuClient
@@ -72,19 +71,3 @@ for i in range(3):
         f"service={info['service_type']}  reward={reward:.4f}"
     )
     env.render()
-
-# --- 7. Mock Environment (5 steps, no server) ---
-print("\n=== Mock Environment (5 steps, no server) ===")
-mock_env = MockSDNEnv(cfg)
-state, info = mock_env.reset(seed=42, options={"service_type": "eMBB"})
-print(f"  Reset state: {state}")
-
-for i in range(5):
-    action = mock_env.action_space.sample()
-    state, reward, terminated, truncated, info = mock_env.step(action)
-    action_names = ["do_nothing", "policy_q0", "policy_q1", "rate_limit", "rm_limit"]
-    print(
-        f"  Step {i + 1}: action={action} ({action_names[action]})  "
-        f"service={info['service_type']}  reward={reward:.4f}"
-    )
-    mock_env.render()

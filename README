@@ -1,120 +1,97 @@
-1. ryu_client.py — HTTP client that talks to the Ryu controller. Handles GET (telemetry) and POST (actions) with retry logic and error handling. Updated with new telemetry calls:
-   - get_link_utilization() → GET /links/utilization
-   - get_latency(src, dst)  → GET /latency/{src}/{dst}
+AI Layer (Live Ryu Integration)
 
-2. telemetry_parser.py — Takes raw JSON from the new telemetry endpoints and builds a normalized 12-element numpy state vector:
-   [util_ran_agg, util_agg_core, util_core_sp1, util_core_sp2, util_sp1_lf1, util_sp2_lf1,
-    latency, packet_loss, traffic_load, service_urllc, service_embb, service_mmtc]
-   Utilization is normalized using fixed link capacity = 100 Mbps.
+This project trains and evaluates a DQN agent that optimizes SDN traffic policy by talking to a real Ryu controller through REST APIs.
 
-3. action_translator.py — Takes an integer action ID (0-4) from the RL agent and converts it into the corresponding Ryu REST API call via ryu_client. Returns an ActionResult with success/failure info.
-   QoS actions are now assumed to be enforced at the Core switch (configured by switch_dpid).
+Implemented modules
 
-4. mock_ryu_server.py — Fake Ryu controller running on localhost:8080. Updated to serve:
-   - /links/utilization (6 monitored links)
-   - /latency/{src}/{dst}
-   Also still accepts POST/PUT actions for control-plane testing.
+1. ai_layer/network_interface/ryu_client.py
+- HTTP client with retry/error handling.
+- Telemetry:
+  - GET /links/utilization
+  - GET /latency/{src}/{dst}
+- Actions:
+  - Queue/rate-limit REST calls used by the action translator.
 
-5. reward.py — Service-aware reward function using the 12D state:
-   - URLLC: prioritize low latency and low packet loss
-   - eMBB: prioritize throughput (traffic_load) while controlling congestion
-   - mMTC: prioritize stability and lower loss
-   Final reward clipped to [-10, 10].
+2. ai_layer/network_interface/telemetry_parser.py
+- Converts raw telemetry JSON into normalized 12D state:
+  [u_ran_agg, u_agg_core, u_core_sp1, u_core_sp2, u_sp1_lf1, u_sp2_lf1,
+   latency, packet_loss, traffic, svc_urllc, svc_embb, svc_mmtc]
 
-6. sdn_env.py — Gymnasium environment that wraps the LIVE network. Uses ryu_client + telemetry_parser + action_translator + reward. Updated observation is 12D. Each step(): execute action → wait 2s → collect /links/utilization and /latency → compute reward.
+3. ai_layer/network_interface/action_translator.py
+- Maps action ID (0-4) to concrete Ryu QoS/flow operations.
+- Returns ActionResult(success, message, metadata).
 
-7. mock_env.py — Gymnasium environment that simulates the network OFFLINE with the updated topology model. No server needed. Simulates:
-   - 6 link utilizations (main + backup branches)
-   - latency and packet loss dynamics
-   - traffic changes
-   - service one-hot encoding (URLLC/eMBB/mMTC)
+4. ai_layer/environments/sdn_env.py
+- Live Gymnasium environment against real Ryu + Mininet traffic.
+- step(action): execute action -> wait stabilization_delay -> collect telemetry -> compute reward.
 
-8. q_network.py — Implemented PyTorch Q-network (MLP):
-     state_dim → 64 → 64 → action_dim using Linear + ReLU.
+5. ai_layer/utils/reward.py
+- Service-intent-aware reward with decomposed components.
+- Supports anti-collapse terms (action repeat penalty, outcome improvement bonus).
 
-9. replay_buffer.py — Implemented experience replay buffer. Stores:
-     state, action, reward, next_state, done
-     and supports random minibatch sampling.
+6. ai_layer/models/q_network.py
+- Q-network MLP: state_dim -> 64 -> 64 -> action_dim.
 
-10. dqn_agent.py — Implemented DQN agent:
-     - epsilon-greedy action selection
-     - online + target Q networks
-     - Adam optimizer
-     - replay training step with gradient clipping
-     - per-episode epsilon decay
+7. ai_layer/agent/replay_buffer.py
+- Experience replay buffer with random minibatch sampling.
 
-11. train.py — Implemented training entrypoint:
-     - config-driven setup (prod.json)
-     - warmup/min-buffer gating before learning
-     - periodic target network update + checkpoints
-     - reward-component logging per episode
-     - CLI options: --config, --seed, --model-path
+8. ai_layer/agent/dqn_agent.py
+- DQN policy/target networks, epsilon-greedy, Bellman update, target sync, gradient clipping.
 
-12. evaluate.py — Implemented evaluation entrypoint:
-     - loads trained model and runs greedy policy (epsilon=0)
-     - compares DQN vs random vs do_nothing baselines
-     - fixed report includes action distribution, latency/loss proxies,
-       congestion-hit rate, and reward component shares
-     - CLI options: --config, --seed, --model-path, --metrics-path
+9. train.py
+- Config-driven training loop, warmup gating, checkpoints, optional seed/model path overrides.
 
-13. run_reward_alignment_experiment.py — Implemented 3-seed experiment runner:
-     - runs train + evaluate across multiple seeds
-     - writes per-seed metrics and overall pass/fail checks
-     - outputs logs/reward_alignment_report.json
+10. evaluate.py
+- Greedy DQN evaluation plus baseline comparison (random, do_nothing).
+- Emits metrics JSON (action mix, switch rate, latency/loss proxies, reward-component shares).
 
+11. run_reward_alignment_experiment.py
+- Multi-seed train/evaluate runner and consolidated acceptance report.
 
-Data flow so far:
+12. clint_test.py
+- Integration smoke test for telemetry parsing, action translation, and live environment stepping.
 
-=== LIVE mode (sdn_env.py + mock_ryu_server) ===
-mock_ryu_server (port 8080)
-       ↓ GET /links/utilization and GET /latency/{src}/{dst}
-  ryu_client telemetry calls
-       ↓ raw JSON
-  telemetry_parser.build_state(...)
-       ↓ np.array([12])
-     agent decides action_id
-       ↓ int (0-4)
-  action_translator.execute(action_id)
-       ↓ uses ryu_client POST
-  mock_ryu_server receives command
-       ↓ wait 2s (stabilization)
-  reward.compute_reward(state)
-       ↓ float
+Live data flow
 
-=== OFFLINE mode (mock_env.py, no server needed) ===
-  mock_env.reset()
-       ↓ random initial state (12D)
-     agent decides action_id
-       ↓ int (0-4)
-  mock_env.step(action_id)
-       ↓ simulates link load + latency + loss + service intent
-  reward.compute_reward(state)
-       ↓ float
+Ryu telemetry endpoints -> ryu_client -> telemetry_parser -> 12D state -> DQN action ->
+action_translator -> Ryu control endpoints -> stabilization delay -> next telemetry -> reward.
 
+Repository layout
 
-Files:
-  ai_layer/
-    network_interface/
-      ryu_client.py          — HTTP REST client (updated telemetry endpoints)
-      telemetry_parser.py    — new telemetry JSON → 12D state vector
-      action_translator.py   — action ID → REST call (Core QoS assumption)
-      mock_ryu_server.py     — fake Ryu for testing (updated APIs)
-    environments/
-      sdn_env.py             — Gym env (live network, 12D state)
-      mock_env.py            — Gym env (offline simulation, 12D state)
-    agent/
-               dqn_agent.py           — DQN agent (implemented)
-               replay_buffer.py       — Experience replay (implemented)
-    models/
-               q_network.py           — Q-network MLP (implemented)
-    training/
-               trainer.py             — training wrapper placeholder
-    utils/
-      reward.py              — service-aware reward function
-      config.py              — (not built yet)
-     train.py                   — training entrypoint (implemented)
-     evaluate.py                — evaluation entrypoint + baselines (implemented)
-     run_reward_alignment_experiment.py — multi-seed fixed-report runner
-  clint_test.py              — integration test (updated for new telemetry/state)
-  prod.json                  — updated config (100 Mbps, Core switch, 12D state)
-  INTEGRATION_NOTES.md       — notes for real Ryu connection
+ai_layer/
+  network_interface/
+    ryu_client.py
+    telemetry_parser.py
+    action_translator.py
+  environments/
+    sdn_env.py
+  agent/
+    dqn_agent.py
+    replay_buffer.py
+  models/
+    q_network.py
+  training/
+    trainer.py
+  utils/
+    reward.py
+    config.py
+train.py
+evaluate.py
+run_reward_alignment_experiment.py
+clint_test.py
+prod.json
+INTEGRATION_NOTES.md
+
+Quick start
+
+1. Install dependencies
+   pip install -r requirements.txt
+
+2. Validate live controller connectivity
+   python clint_test.py
+
+3. Evaluate a trained model
+   python evaluate.py --config prod.json --model-path models/dqn_model.pth
+
+4. Train on live environment
+   python train.py --config prod.json --model-path models/dqn_model_live.pth
