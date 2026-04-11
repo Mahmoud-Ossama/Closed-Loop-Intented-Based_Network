@@ -29,6 +29,39 @@
    - traffic changes
    - service one-hot encoding (URLLC/eMBB/mMTC)
 
+8. q_network.py — Implemented PyTorch Q-network (MLP):
+     state_dim → 64 → 64 → action_dim using Linear + ReLU.
+
+9. replay_buffer.py — Implemented experience replay buffer. Stores:
+     state, action, reward, next_state, done
+     and supports random minibatch sampling.
+
+10. dqn_agent.py — Implemented DQN agent:
+     - epsilon-greedy action selection
+     - online + target Q networks
+     - Adam optimizer
+     - replay training step with gradient clipping
+     - per-episode epsilon decay
+
+11. train.py — Implemented training entrypoint:
+     - config-driven setup (prod.json)
+     - warmup/min-buffer gating before learning
+     - periodic target network update + checkpoints
+     - reward-component logging per episode
+     - CLI options: --config, --seed, --model-path
+
+12. evaluate.py — Implemented evaluation entrypoint:
+     - loads trained model and runs greedy policy (epsilon=0)
+     - compares DQN vs random vs do_nothing baselines
+     - fixed report includes action distribution, latency/loss proxies,
+       congestion-hit rate, and reward component shares
+     - CLI options: --config, --seed, --model-path, --metrics-path
+
+13. run_reward_alignment_experiment.py — Implemented 3-seed experiment runner:
+     - runs train + evaluate across multiple seeds
+     - writes per-seed metrics and overall pass/fail checks
+     - outputs logs/reward_alignment_report.json
+
 
 Data flow so far:
 
@@ -39,7 +72,7 @@ mock_ryu_server (port 8080)
        ↓ raw JSON
   telemetry_parser.build_state(...)
        ↓ np.array([12])
-  agent decides action_id  ← (not built yet)
+     agent decides action_id
        ↓ int (0-4)
   action_translator.execute(action_id)
        ↓ uses ryu_client POST
@@ -51,7 +84,7 @@ mock_ryu_server (port 8080)
 === OFFLINE mode (mock_env.py, no server needed) ===
   mock_env.reset()
        ↓ random initial state (12D)
-  agent decides action_id  ← (not built yet)
+     agent decides action_id
        ↓ int (0-4)
   mock_env.step(action_id)
        ↓ simulates link load + latency + loss + service intent
@@ -70,15 +103,18 @@ Files:
       sdn_env.py             — Gym env (live network, 12D state)
       mock_env.py            — Gym env (offline simulation, 12D state)
     agent/
-      dqn_agent.py           — (not built yet)
-      replay_buffer.py       — (not built yet)
+               dqn_agent.py           — DQN agent (implemented)
+               replay_buffer.py       — Experience replay (implemented)
     models/
-      q_network.py           — (not built yet)
+               q_network.py           — Q-network MLP (implemented)
     training/
-      trainer.py             — (not built yet)
+               trainer.py             — training wrapper placeholder
     utils/
       reward.py              — service-aware reward function
       config.py              — (not built yet)
+     train.py                   — training entrypoint (implemented)
+     evaluate.py                — evaluation entrypoint + baselines (implemented)
+     run_reward_alignment_experiment.py — multi-seed fixed-report runner
   clint_test.py              — integration test (updated for new telemetry/state)
   prod.json                  — updated config (100 Mbps, Core switch, 12D state)
   INTEGRATION_NOTES.md       — notes for real Ryu connection

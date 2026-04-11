@@ -15,8 +15,16 @@
       "stabilization_delay_seconds": 2.0,
       "num_ports": 3,
       "topology": {
-        "main_path": ["core", "sp1", "lf1"],
-        "backup_path": ["core", "sp2", "lf1"]
+        "main_path": [
+          "core",
+          "sp1",
+          "lf1"
+        ],
+        "backup_path": [
+          "core",
+          "sp2",
+          "lf1"
+        ]
       }
     },
     "monitoring": {
@@ -55,7 +63,10 @@
       ],
       "normalization": {
         "method": "min-max",
-        "range": [0.0, 1.0]
+        "range": [
+          0.0,
+          1.0
+        ]
       }
     },
     "action_space": {
@@ -115,7 +126,10 @@
       "architecture": "MLP",
       "input_dim": 12,
       "output_dim": 5,
-      "hidden_layers": [64, 64],
+      "hidden_layers": [
+        64,
+        64
+      ],
       "activation": "ReLU"
     },
     "hyperparameters": {
@@ -138,7 +152,7 @@
     "loss_function": "MSE"
   },
   "training": {
-    "num_episodes": 1000,
+    "num_episodes": 220,
     "warmup_steps": 1000,
     "evaluation_frequency": 50,
     "save_frequency": 100,
@@ -176,7 +190,7 @@
       },
       "balance_bonus": {
         "enabled": true,
-        "weight": 1.0,
+        "weight": 0.3,
         "formula": "1 / (1 + std(link_utilization))",
         "description": "Reward for balanced link utilization"
       },
@@ -188,18 +202,21 @@
       },
       "action_repeat_penalty": {
         "enabled": true,
-        "weight": 0.2,
+        "weight": 0.1,
         "description": "Small penalty to discourage repeated identical actions"
       },
       "outcome_improvement_bonus": {
         "enabled": true,
-        "weight": 0.5,
-        "max_bonus": 0.2,
+        "weight": 2.0,
+        "max_bonus": 0.3,
         "description": "Bonus for routing actions that reduce max-link congestion"
       }
     },
     "normalization": {
-      "clip_range": [-10.0, 10.0]
+      "clip_range": [
+        -10.0,
+        10.0
+      ]
     }
   },
   "logging": {
@@ -293,7 +310,7 @@
   },
   "debugging": {
     "mock_mode": {
-      "enabled": true, 
+      "enabled": true,
       "description": "Use mock environment for offline training"
     },
     "verbose_actions": true,

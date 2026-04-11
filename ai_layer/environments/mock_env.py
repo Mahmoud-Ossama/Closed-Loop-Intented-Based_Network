@@ -12,7 +12,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from ai_layer.utils.reward import compute_reward
+from ai_layer.utils.reward import compute_reward_details
 
 
 class MockSDNEnv(gym.Env):
@@ -30,6 +30,15 @@ class MockSDNEnv(gym.Env):
         self.max_steps = env_cfg["episode"]["max_steps"]
         self.reward_cfg = config.get("reward_function", None)
         self.active_service = mon_cfg.get("active_service", "URLLC")
+        repeat_cfg = self.reward_cfg.get("components", {}).get("action_repeat_penalty", {}) if self.reward_cfg else {}
+        self.repeat_penalty_weight = (
+            float(repeat_cfg.get("weight", 0.0)) if bool(repeat_cfg.get("enabled", False)) else 0.0
+        )
+        outcome_cfg = self.reward_cfg.get("components", {}).get("outcome_improvement_bonus", {}) if self.reward_cfg else {}
+        self.outcome_bonus_weight = (
+            float(outcome_cfg.get("weight", 0.0)) if bool(outcome_cfg.get("enabled", False)) else 0.0
+        )
+        self.outcome_bonus_max = float(outcome_cfg.get("max_bonus", 0.2)) if outcome_cfg else 0.2
 
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(12,), dtype=np.float32
@@ -41,11 +50,13 @@ class MockSDNEnv(gym.Env):
         self._loss = 0.0
         self._current_step = 0
         self._rng = np.random.default_rng()
+        self._last_action = None
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._rng = np.random.default_rng(seed)
         self._current_step = 0
+        self._last_action = None
 
         if options and "service_type" in options:
             self.active_service = str(options["service_type"])
@@ -58,16 +69,41 @@ class MockSDNEnv(gym.Env):
 
     def step(self, action: int):
         self._current_step += 1
+        prev_congestion = float(np.max(self._utils))
 
         self._apply_action(action)
         self._simulate_traffic()
 
         state = self._build_state()
-        reward = compute_reward(state, self.reward_cfg)
+        reward_details = compute_reward_details(state, self.reward_cfg)
+
+        repeat_penalty = 0.0
+        if self.repeat_penalty_weight > 0.0 and self._last_action is not None and action == self._last_action:
+            repeat_penalty = -self.repeat_penalty_weight
+
+        outcome_bonus = 0.0
+        post_congestion = float(np.max(state[:6]))
+        if self.outcome_bonus_weight > 0.0 and action in (1, 2):
+            improvement = max(0.0, prev_congestion - post_congestion)
+            outcome_bonus = min(self.outcome_bonus_max, improvement * self.outcome_bonus_weight)
+
+        reward = reward_details["total"] + repeat_penalty + outcome_bonus
+
+        clip_lo, clip_hi = -10.0, 10.0
+        if self.reward_cfg is not None:
+            clip_lo, clip_hi = self.reward_cfg.get("normalization", {}).get("clip_range", [clip_lo, clip_hi])
+        reward = float(np.clip(reward, clip_lo, clip_hi))
+        reward_details["action_repeat_penalty"] = repeat_penalty
+        reward_details["outcome_improvement_bonus"] = outcome_bonus
+        reward_details["total"] = reward
+        self._last_action = action
 
         terminated = False
         truncated = self._current_step >= self.max_steps
-        return state, reward, terminated, truncated, {"service_type": self.active_service}
+        return state, reward, terminated, truncated, {
+            "service_type": self.active_service,
+            "reward_components": reward_details,
+        }
 
     def render(self):
         s = self._build_state()
