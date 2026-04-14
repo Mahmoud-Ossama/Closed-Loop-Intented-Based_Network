@@ -11,25 +11,27 @@
     },
     "network": {
       "switch_dpid": "0000000000000030",
-      "link_capacity_mbps": 100.0,
+      "main_link_capacity_mbps": 20.0,
+      "backup_link_capacity_mbps": 10.0,
       "stabilization_delay_seconds": 2.0,
       "num_ports": 3,
       "topology": {
-        "main_path": [
-          "core",
-          "sp1",
-          "lf1"
-        ],
-        "backup_path": [
-          "core",
-          "sp2",
-          "lf1"
-        ]
+        "main_path": ["core", "sp1", "lf1"],
+        "backup_path": ["core", "sp2", "lf1"]
+      },
+      "switch_dpids": {
+        "RAN": "0000000000000010",
+        "agg": "0000000000000020",
+        "core": "0000000000000030",
+        "sp1": "0000000000000040",
+        "sp2": "0000000000000041",
+        "lf1": "0000000000000050"
       }
     },
     "monitoring": {
-      "active_service": "URLLC",
-      "latency_cap_ms": 200.0,
+      "latency_min_ms": 10.0,
+      "latency_max_ms": 80.0,
+      "packet_loss_max_percent": 5.0,
       "main_pair": {
         "src": "G6_D1",
         "dst": "URLLC"
@@ -39,97 +41,468 @@
         "dst": "MNR_SVR"
       }
     },
-    "service_mapping": {
-      "G6_D1": "URLLC",
-      "G6_D2": "eMBB",
-      "G6_IOT_D": "mMTC",
-      "MNR_D": "URLLC"
-    },
     "state_space": {
-      "dimension": 12,
+      "dimension": 6,
       "features": [
-        "util_ran_agg",
-        "util_agg_core",
-        "util_core_sp1",
-        "util_core_sp2",
-        "util_sp1_lf1",
-        "util_sp2_lf1",
         "latency",
-        "packet_loss_rate",
-        "total_traffic_load",
-        "service_urllc",
-        "service_embb",
-        "service_mmtc"
+        "packet_loss",
+        "throughput",
+        "main_link_util",
+        "backup_link_util",
+        "failover_active"
       ],
       "normalization": {
         "method": "min-max",
-        "range": [
-          0.0,
-          1.0
-        ]
+        "range": [0.0, 1.0]
       }
     },
     "action_space": {
       "type": "discrete",
-      "dimension": 5,
+      "dimension": 4,
       "actions": {
         "0": {
           "name": "do_nothing",
-          "description": "Maintain current network state"
+          "description": "Keep current routing and queue settings"
         },
         "1": {
-          "name": "route_to_queue_0",
-          "description": "Send UDP traffic to high-priority queue",
+          "name": "update_queue",
+          "description": "Adjust queue allocation on main core uplink",
           "target": {
-            "queue_id": 0,
-            "protocol": "UDP",
-            "port": 5002,
-            "destination_ip": "20.0.0.2"
+            "switch_dpid": "0000000000000030",
+            "qos_config": {
+              "port_name": "core-eth2",
+              "type": "linux-htb",
+              "max_rate": "20000000",
+              "queues": [
+                {
+                  "max_rate": "20000000"
+                },
+                {
+                  "min_rate": "10000000"
+                },
+                {
+                  "min_rate": "6000000"
+                },
+                {
+                  "max_rate": "4000000"
+                }
+              ]
+            }
           }
         },
         "2": {
-          "name": "route_to_queue_1",
-          "description": "Send UDP traffic to low-priority queue",
+          "name": "failover",
+          "description": "Switch service route to backup path via spine2",
           "target": {
-            "queue_id": 1,
-            "protocol": "UDP",
-            "port": 5002,
-            "destination_ip": "20.0.0.1"
+            "switch_dpid": "0000000000000030",
+            "route": {
+              "destination": "20.0.0.0/24",
+              "gateway": "14.0.0.2"
+            },
+            "set_failover_active": true
           }
         },
         "3": {
-          "name": "apply_rate_limit",
-          "description": "Apply 500 kbps rate limit to port s1-eth1",
+          "name": "reroute",
+          "description": "Restore service route to main path via spine1",
           "target": {
-            "port_name": "core-eth-uplink",
-            "max_rate_bps": 500000
-          }
-        },
-        "4": {
-          "name": "remove_rate_limit",
-          "description": "Remove rate limit, restore to 1 Mbps",
-          "target": {
-            "port_name": "core-eth-uplink",
-            "max_rate_bps": 1000000
+            "switch_dpid": "0000000000000030",
+            "route": {
+              "destination": "20.0.0.0/24",
+              "gateway": "13.0.0.2"
+            },
+            "set_failover_active": false
           }
         }
       }
     },
+    "startup_setup": {
+      "enabled": true,
+      "continue_on_error": false,
+      "ovsdb_addr": "tcp:127.0.0.1:6632",
+      "routing": {
+        "node_order": [
+          "0000000000000010",
+          "0000000000000020",
+          "0000000000000030",
+          "0000000000000040",
+          "0000000000000041",
+          "0000000000000050"
+        ],
+        "nodes": {
+          "0000000000000010": {
+            "addresses": ["10.0.0.254/24", "17.0.0.254/24", "11.0.0.1/24"],
+            "routes": [],
+            "default_gateway": "11.0.0.2"
+          },
+          "0000000000000020": {
+            "addresses": ["11.0.0.2/24", "12.0.0.1/24"],
+            "routes": [
+              {
+                "destination": "10.0.0.0/24",
+                "gateway": "11.0.0.1"
+              },
+              {
+                "destination": "17.0.0.0/24",
+                "gateway": "11.0.0.1"
+              }
+            ],
+            "default_gateway": "12.0.0.2"
+          },
+          "0000000000000030": {
+            "addresses": ["12.0.0.2/24", "13.0.0.1/24", "14.0.0.1/24"],
+            "routes": [
+              {
+                "destination": "10.0.0.0/24",
+                "gateway": "12.0.0.1"
+              },
+              {
+                "destination": "20.0.0.0/24",
+                "gateway": "13.0.0.2"
+              },
+              {
+                "destination": "17.0.0.0/24",
+                "gateway": "12.0.0.1"
+              }
+            ],
+            "default_gateway": "14.0.0.2"
+          },
+          "0000000000000040": {
+            "addresses": ["13.0.0.2/24", "15.0.0.1/24"],
+            "routes": [
+              {
+                "destination": "20.0.0.0/24",
+                "gateway": "15.0.0.2"
+              }
+            ],
+            "default_gateway": "13.0.0.1"
+          },
+          "0000000000000041": {
+            "addresses": ["14.0.0.2/24", "16.0.0.1/24"],
+            "routes": [
+              {
+                "destination": "20.0.0.0/24",
+                "gateway": "16.0.0.2"
+              },
+              {
+                "destination": "18.0.0.0/24",
+                "gateway": "16.0.0.2"
+              }
+            ],
+            "default_gateway": "14.0.0.1"
+          },
+          "0000000000000050": {
+            "addresses": ["15.0.0.2/24", "16.0.0.2/24", "20.0.0.254/24", "18.0.0.254/24"],
+            "routes": [
+              {
+                "destination": "17.0.0.0/24",
+                "gateway": "16.0.0.1"
+              }
+            ],
+            "default_gateway": "15.0.0.1"
+          }
+        }
+      },
+      "qos_baseline": {
+        "rules": [
+          {
+            "switch_dpid": "0000000000000020",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "nw_dst": "20.0.0.1",
+                "ip_proto": 17,
+                "tp_dst": 5001
+              },
+              "actions": {
+                "mark": "46"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000020",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "nw_dst": "20.0.0.2",
+                "ip_proto": 17,
+                "tp_dst": 5002
+              },
+              "actions": {
+                "mark": "34"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000020",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "nw_dst": "20.0.0.3",
+                "ip_proto": 17,
+                "tp_dst": 5003
+              },
+              "actions": {
+                "mark": "10"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000030",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "ip_dscp": "46"
+              },
+              "actions": {
+                "queue": "1"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000030",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "ip_dscp": "34"
+              },
+              "actions": {
+                "queue": "2"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000030",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "ip_dscp": "10"
+              },
+              "actions": {
+                "queue": "3"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000040",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "ip_dscp": "46"
+              },
+              "actions": {
+                "queue": "1"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000040",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "ip_dscp": "34"
+              },
+              "actions": {
+                "queue": "2"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000040",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "ip_dscp": "10"
+              },
+              "actions": {
+                "queue": "3"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000041",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "ip_dscp": "46"
+              },
+              "actions": {
+                "queue": "1"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000041",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "ip_dscp": "34"
+              },
+              "actions": {
+                "queue": "2"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000041",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "ip_dscp": "10"
+              },
+              "actions": {
+                "queue": "3"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000050",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "nw_src": "20.0.0.1",
+                "ip_proto": 17,
+                "tp_src": 5001
+              },
+              "actions": {
+                "mark": "46"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000050",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "nw_src": "20.0.0.2",
+                "ip_proto": 17,
+                "tp_src": 5002
+              },
+              "actions": {
+                "mark": "34"
+              }
+            }
+          },
+          {
+            "switch_dpid": "0000000000000050",
+            "rule": {
+              "match": {
+                "eth_type": 2048,
+                "nw_src": "20.0.0.3",
+                "ip_proto": 17,
+                "tp_src": 5003
+              },
+              "actions": {
+                "mark": "10"
+              }
+            }
+          }
+        ],
+        "queues": [
+          {
+            "switch_dpid": "0000000000000030",
+            "qos_config": {
+              "port_name": "core-eth2",
+              "type": "linux-htb",
+              "max_rate": "20000000",
+              "queues": [
+                {
+                  "max_rate": "20000000"
+                },
+                {
+                  "min_rate": "8000000"
+                },
+                {
+                  "min_rate": "8000000"
+                },
+                {
+                  "max_rate": "4000000"
+                }
+              ]
+            }
+          },
+          {
+            "switch_dpid": "0000000000000030",
+            "qos_config": {
+              "port_name": "core-eth3",
+              "type": "linux-htb",
+              "max_rate": "10000000",
+              "queues": [
+                {
+                  "max_rate": "10000000"
+                },
+                {
+                  "min_rate": "4000000"
+                },
+                {
+                  "min_rate": "4000000"
+                },
+                {
+                  "max_rate": "2000000"
+                }
+              ]
+            }
+          },
+          {
+            "switch_dpid": "0000000000000040",
+            "qos_config": {
+              "port_name": "sp1-eth1",
+              "type": "linux-htb",
+              "max_rate": "20000000",
+              "queues": [
+                {
+                  "max_rate": "20000000"
+                },
+                {
+                  "min_rate": "8000000"
+                },
+                {
+                  "min_rate": "8000000"
+                },
+                {
+                  "max_rate": "4000000"
+                }
+              ]
+            }
+          },
+          {
+            "switch_dpid": "0000000000000041",
+            "qos_config": {
+              "port_name": "sp2-eth1",
+              "type": "linux-htb",
+              "max_rate": "10000000",
+              "queues": [
+                {
+                  "max_rate": "10000000"
+                },
+                {
+                  "min_rate": "4000000"
+                },
+                {
+                  "min_rate": "4000000"
+                },
+                {
+                  "max_rate": "2000000"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
     "episode": {
       "max_steps": 50,
-      "timeout_seconds": 300
+      "timeout_seconds": 300,
+      "call_network_reset_on_reset": false
     }
   },
   "agent": {
     "algorithm": "DQN",
     "neural_network": {
       "architecture": "MLP",
-      "input_dim": 12,
-      "output_dim": 5,
-      "hidden_layers": [
-        64,
-        64
-      ],
+      "input_dim": 6,
+      "output_dim": 4,
+      "hidden_layers": [64, 64],
       "activation": "ReLU"
     },
     "hyperparameters": {
@@ -152,10 +525,11 @@
     "loss_function": "MSE"
   },
   "training": {
-    "num_episodes": 220,
+    "num_episodes": 1000,
     "warmup_steps": 1000,
     "evaluation_frequency": 50,
     "save_frequency": 100,
+    "run_startup_setup": true,
     "early_stopping": {
       "enabled": true,
       "patience": 100,
@@ -168,37 +542,38 @@
     }
   },
   "reward_function": {
-    "type": "multi_objective",
+    "type": "operational_qos",
     "components": {
-      "utilization_penalty": {
+      "latency_penalty": {
         "enabled": true,
-        "weight": 1.0,
-        "formula": "mean(link_utilization)^2",
-        "description": "Quadratic penalty for high link utilization"
+        "weight": 2.5,
+        "description": "Penalty for high latency in realistic 10-80 ms band"
       },
       "packet_loss_penalty": {
         "enabled": true,
         "weight": 3.0,
-        "formula": "packet_loss_rate * weight",
-        "description": "Heavy penalty for packet drops"
+        "description": "Penalty for packet loss in 0-5 percent operating range"
       },
-      "latency_penalty": {
+      "utilization_penalty": {
         "enabled": true,
-        "weight": 2.0,
-        "formula": "latency / latency_cap",
-        "description": "Penalty for end-to-end latency"
+        "weight": 1.2,
+        "description": "Penalty for sustained high average path utilization"
       },
-      "balance_bonus": {
+      "throughput_bonus": {
         "enabled": true,
-        "weight": 0.3,
-        "formula": "1 / (1 + std(link_utilization))",
-        "description": "Reward for balanced link utilization"
+        "weight": 1.5,
+        "description": "Reward for maintaining higher normalized throughput"
       },
       "congestion_threshold": {
         "enabled": true,
-        "threshold": 0.8,
+        "threshold": 0.9,
         "penalty": 2.0,
-        "description": "Extra penalty if any link exceeds 80% utilization"
+        "description": "Penalty when any path utilization crosses threshold"
+      },
+      "failover_penalty": {
+        "enabled": true,
+        "weight": 0.2,
+        "description": "Small cost to avoid unnecessary backup-path residency"
       },
       "action_repeat_penalty": {
         "enabled": true,
@@ -207,16 +582,13 @@
       },
       "outcome_improvement_bonus": {
         "enabled": true,
-        "weight": 2.0,
-        "max_bonus": 0.3,
-        "description": "Bonus for routing actions that reduce max-link congestion"
+        "weight": 1.0,
+        "max_bonus": 0.2,
+        "description": "Bonus for actions that reduce max path congestion"
       }
     },
     "normalization": {
-      "clip_range": [
-        -10.0,
-        10.0
-      ]
+      "clip_range": [-10.0, 10.0]
     }
   },
   "logging": {
@@ -257,6 +629,7 @@
     "epsilon": 0.0,
     "render": false,
     "save_trajectories": true,
+    "run_startup_setup": false,
     "baseline_policies": [
       {
         "name": "random",
@@ -272,23 +645,31 @@
     "description": "Traffic patterns for Mininet environment",
     "patterns": [
       {
-        "name": "constant_load",
+        "name": "urllc_flow",
         "type": "UDP",
-        "source": "h2",
-        "destination": "10.0.0.1",
-        "port": 5002,
-        "bandwidth": "800k",
+        "source": "G6_D1",
+        "destination": "20.0.0.1",
+        "port": 5001,
+        "bandwidth": "6m",
         "duration": 3600
       },
       {
-        "name": "bursty_load",
+        "name": "embb_flow",
         "type": "UDP",
-        "source": "h3",
-        "destination": "10.0.0.1",
+        "source": "G6_D2",
+        "destination": "20.0.0.2",
+        "port": 5002,
+        "bandwidth": "8m",
+        "duration": 3600
+      },
+      {
+        "name": "mmtc_flow",
+        "type": "UDP",
+        "source": "G6_IOT_D",
+        "destination": "20.0.0.3",
         "port": 5003,
-        "bandwidth": "1200k",
-        "burst_interval": 10,
-        "burst_duration": 5
+        "bandwidth": "3m",
+        "duration": 3600
       }
     ],
     "background_traffic": {
@@ -299,8 +680,8 @@
   },
   "api_endpoints": {
     "ryu": {
-      "port_stats": "/stats/port/{dpid}",
-      "flow_stats": "/stats/flow/{dpid}",
+      "router_ovsdb": "/v1.0/conf/switches/{switch_id}/ovsdb_addr",
+      "router_node": "/router/{switch_id}",
       "qos_queue": "/qos/queue/{switch_id}",
       "qos_rules": "/qos/rules/{switch_id}",
       "network_reset": "/network/reset",
@@ -311,7 +692,8 @@
   "debugging": {
     "verbose_actions": true,
     "log_state_transitions": true,
-    "save_failed_requests": true
+    "save_failed_requests": true,
+    "dry_run_setup": false
   },
   "system": {
     "random_seed": 42,
@@ -320,16 +702,16 @@
     "deterministic": true
   },
   "metadata": {
-    "version": "1.0.0",
+    "version": "2.0.0",
     "created_date": "2026-03-09",
     "author": "Ali",
-    "description": "Production configuration for RL-based SDN traffic optimization prototype",
+    "description": "Routing-first production configuration for RL-based SDN optimization",
     "notes": [
-      "State space expanded to 12 features with service intent encoding",
-      "Single DQN agent for simplicity",
-      "QoS actions are enforced at Core switch",
-      "2-second stabilization delay after each action",
-      "Traffic generation required in Mininet for meaningful learning"
+      "Routing and baseline QoS are initialized once at startup",
+      "Runtime actions are optimization-only: update_queue, failover, reroute",
+      "State vector moved to 6 operational features with failover awareness",
+      "Main and backup path capacities are 20 Mbps and 10 Mbps",
+      "Latency normalization is tuned for 10-80 ms operating range"
     ]
   }
 }

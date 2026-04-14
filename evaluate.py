@@ -10,6 +10,7 @@ import torch
 
 from ai_layer.agent.dqn_agent import DQNAgent
 from ai_layer.environments.sdn_env import SDNEnv
+from ai_layer.network_setup import NetworkInitializer
 
 
 def build_environment(config: dict):
@@ -21,6 +22,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate trained DQN and baselines")
     parser.add_argument("--config", default="prod.json", help="Path to config JSON")
     parser.add_argument("--seed", type=int, default=None, help="Random seed override")
+    parser.add_argument(
+        "--skip-setup",
+        action="store_true",
+        help="Skip startup setup before evaluation",
+    )
     parser.add_argument(
         "--model-path",
         default=os.path.join("models", "dqn_model.pth"),
@@ -58,9 +64,13 @@ def run_policy(
     switch_count = 0
     switch_opportunities = 0
     prev_action = None
+
     latency_sum = 0.0
     loss_sum = 0.0
+    throughput_sum = 0.0
+    failover_sum = 0.0
     congestion_hits = 0
+
     comp_sums = {}
     comp_steps = 0
 
@@ -105,9 +115,12 @@ def run_policy(
             steps += 1
             total_steps += 1
 
-            latency_sum += float(next_state[6])
-            loss_sum += float(next_state[7])
-            if float(np.max(next_state[:6])) > congestion_threshold:
+            latency_sum += float(next_state[0])
+            loss_sum += float(next_state[1])
+            throughput_sum += float(next_state[2])
+            failover_sum += float(next_state[5])
+
+            if float(max(next_state[3], next_state[4])) > congestion_threshold:
                 congestion_hits += 1
 
             if render:
@@ -129,18 +142,24 @@ def run_policy(
     avg_steps = (sum(episode_steps) / len(episode_steps)) if episode_steps else 0.0
     min_reward = min(episode_rewards) if episode_rewards else 0.0
     max_reward = max(episode_rewards) if episode_rewards else 0.0
+
     action_success_rate = (success_steps / total_steps) if total_steps > 0 else 0.0
     action_switch_rate = (switch_count / switch_opportunities) if switch_opportunities > 0 else 0.0
+    dominant_action_ratio = (max(action_counts.values()) / total_steps) if total_steps > 0 else 0.0
+
     avg_latency_proxy = (latency_sum / total_steps) if total_steps > 0 else 0.0
     avg_packet_loss_proxy = (loss_sum / total_steps) if total_steps > 0 else 0.0
+    avg_throughput_proxy = (throughput_sum / total_steps) if total_steps > 0 else 0.0
+    failover_active_rate = (failover_sum / total_steps) if total_steps > 0 else 0.0
     congestion_hit_rate = (congestion_hits / total_steps) if total_steps > 0 else 0.0
-    dominant_action_ratio = (max(action_counts.values()) / total_steps) if total_steps > 0 else 0.0
 
     contrib_keys = [
         "latency_penalty",
         "packet_loss_penalty",
+        "utilization_penalty",
+        "throughput_bonus",
         "congestion_penalty",
-        "balance_bonus",
+        "failover_penalty",
         "outcome_improvement_bonus",
         "action_repeat_penalty",
     ]
@@ -165,6 +184,8 @@ def run_policy(
         "dominant_action_ratio": dominant_action_ratio,
         "avg_latency_proxy": avg_latency_proxy,
         "avg_packet_loss_proxy": avg_packet_loss_proxy,
+        "avg_throughput_proxy": avg_throughput_proxy,
+        "failover_active_rate": failover_active_rate,
         "congestion_hit_rate": congestion_hit_rate,
         "action_counts": action_counts,
         "avg_reward_components": avg_components,
@@ -180,6 +201,11 @@ def main():
     with open(args.config, "r", encoding="utf-8") as f:
         config = json.load(f)
 
+    run_setup = bool(config.get("evaluation", {}).get("run_startup_setup", False)) and not bool(args.skip_setup)
+    if run_setup:
+        summary = NetworkInitializer(config).initialize()
+        print(f"Startup setup completed: {summary.as_dict()}")
+
     seed = int(args.seed) if args.seed is not None else int(config.get("system", {}).get("random_seed", 42))
     set_seed(seed)
 
@@ -193,13 +219,9 @@ def main():
     env_state_dim = int(env.observation_space.shape[0])
     env_action_dim = int(env.action_space.n)
     if nn_cfg["input_dim"] != env_state_dim:
-        raise ValueError(
-            f"State dimension mismatch: config={nn_cfg['input_dim']} env={env_state_dim}"
-        )
+        raise ValueError(f"State dimension mismatch: config={nn_cfg['input_dim']} env={env_state_dim}")
     if nn_cfg["output_dim"] != env_action_dim:
-        raise ValueError(
-            f"Action dimension mismatch: config={nn_cfg['output_dim']} env={env_action_dim}"
-        )
+        raise ValueError(f"Action dimension mismatch: config={nn_cfg['output_dim']} env={env_action_dim}")
 
     agent = DQNAgent(
         state_dim=nn_cfg["input_dim"],
@@ -229,8 +251,9 @@ def main():
         config.get("reward_function", {})
         .get("components", {})
         .get("congestion_threshold", {})
-        .get("threshold", 0.8)
+        .get("threshold", 0.9)
     )
+
     dqn_metrics = run_policy(
         env=env,
         policy_name="dqn",
@@ -295,18 +318,21 @@ def main():
         f"dominant_action_ratio={dqn_metrics['dominant_action_ratio']:.3f} | "
         f"latency_proxy={dqn_metrics['avg_latency_proxy']:.4f} | "
         f"loss_proxy={dqn_metrics['avg_packet_loss_proxy']:.4f} | "
+        f"throughput_proxy={dqn_metrics['avg_throughput_proxy']:.4f} | "
+        f"failover_active_rate={dqn_metrics['failover_active_rate']:.3f} | "
         f"congestion_hit_rate={dqn_metrics['congestion_hit_rate']:.3f}"
     )
     if dqn_metrics["avg_reward_components"]:
         print(f"DQN Avg reward components: {dqn_metrics['avg_reward_components']}")
 
-    for b in baseline_results:
+    for baseline in baseline_results:
         print(
-            f"{b['policy']} -> AvgReward: {b['average_reward']:.4f} | "
-            f"Range: [{b['min_reward']:.4f}, {b['max_reward']:.4f}] | "
-            f"AvgSteps: {b['average_steps']:.2f}"
+            f"{baseline['policy']} -> AvgReward: {baseline['average_reward']:.4f} | "
+            f"Range: [{baseline['min_reward']:.4f}, {baseline['max_reward']:.4f}] | "
+            f"AvgSteps: {baseline['average_steps']:.2f}"
         )
-        print(f"{b['policy']} Action counts: {b['action_counts']}")
+        print(f"{baseline['policy']} Action counts: {baseline['action_counts']}")
+
     print(f"Saved metrics to {metrics_path}")
 
 

@@ -8,6 +8,7 @@ import torch
 
 from ai_layer.agent.dqn_agent import DQNAgent
 from ai_layer.environments.sdn_env import SDNEnv
+from ai_layer.network_setup import NetworkInitializer
 
 
 def build_environment(config: dict):
@@ -19,6 +20,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train DQN agent for SDN control")
     parser.add_argument("--config", default="prod.json", help="Path to config JSON")
     parser.add_argument("--seed", type=int, default=None, help="Random seed override")
+    parser.add_argument(
+        "--skip-setup",
+        action="store_true",
+        help="Skip one-time startup setup before training",
+    )
     parser.add_argument(
         "--model-path",
         default=os.path.join("models", "dqn_model.pth"),
@@ -38,6 +44,11 @@ def main():
 
     with open(args.config, "r", encoding="utf-8") as f:
         config = json.load(f)
+
+    run_setup = bool(config.get("training", {}).get("run_startup_setup", False)) and not bool(args.skip_setup)
+    if run_setup:
+        summary = NetworkInitializer(config).initialize()
+        print(f"Startup setup completed: {summary.as_dict()}")
 
     seed = int(args.seed) if args.seed is not None else int(config.get("system", {}).get("random_seed", 42))
     set_seed(seed)

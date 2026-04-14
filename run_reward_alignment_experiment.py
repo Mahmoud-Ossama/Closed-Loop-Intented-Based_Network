@@ -28,13 +28,14 @@ def main():
     with open(base_config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    # Apply requested reward-alignment settings only.
-    cfg["reward_function"]["components"]["balance_bonus"]["weight"] = 0.3
+    # Apply experiment settings compatible with the operational reward components.
     cfg["reward_function"]["components"]["action_repeat_penalty"]["enabled"] = True
     cfg["reward_function"]["components"]["action_repeat_penalty"]["weight"] = 0.1
     cfg["reward_function"]["components"]["outcome_improvement_bonus"]["enabled"] = True
-    cfg["reward_function"]["components"]["outcome_improvement_bonus"]["weight"] = 2.0
-    cfg["reward_function"]["components"]["outcome_improvement_bonus"]["max_bonus"] = 0.3
+    cfg["reward_function"]["components"]["outcome_improvement_bonus"]["weight"] = 1.0
+    cfg["reward_function"]["components"]["outcome_improvement_bonus"]["max_bonus"] = 0.2
+    cfg["training"]["run_startup_setup"] = False
+    cfg["evaluation"]["run_startup_setup"] = False
     cfg["training"]["num_episodes"] = int(args.episodes)
     cfg["evaluation"]["num_episodes"] = int(args.eval_episodes)
 
@@ -84,17 +85,20 @@ def main():
         do_nothing_r = baselines.get("do_nothing", {}).get("average_reward", float("-inf"))
 
         shares = dqn.get("reward_component_shares", {})
-        balance_share = float(shares.get("balance_bonus", 0.0))
+        throughput_share = float(shares.get("throughput_bonus", 0.0))
         outcome_share = float(shares.get("outcome_improvement_bonus", 0.0))
         latency_share = float(shares.get("latency_penalty", 0.0))
         loss_share = float(shares.get("packet_loss_penalty", 0.0))
+        util_share = float(shares.get("utilization_penalty", 0.0))
         congestion_share = float(shares.get("congestion_penalty", 0.0))
+        failover_share = float(shares.get("failover_penalty", 0.0))
 
         beats_baselines = dqn["average_reward"] > random_r and dqn["average_reward"] > do_nothing_r
         no_collapse = float(dqn.get("dominant_action_ratio", 1.0)) < 0.85
         no_jitter_only = float(dqn.get("action_switch_rate", 1.0)) < 0.75
         outcome_driven = (
-            (latency_share + loss_share + congestion_share + outcome_share) > balance_share
+            (latency_share + loss_share + util_share + congestion_share + failover_share + outcome_share)
+            > throughput_share
         )
 
         seed_reports.append(

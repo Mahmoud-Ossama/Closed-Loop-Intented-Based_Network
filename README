@@ -1,97 +1,72 @@
 AI Layer (Live Ryu Integration)
 
-This project trains and evaluates a DQN agent that optimizes SDN traffic policy by talking to a real Ryu controller through REST APIs.
+This project trains and evaluates a DQN agent that optimizes SDN behavior against a real Ryu controller.
 
-Implemented modules
+Pipeline contract
 
-1. ai_layer/network_interface/ryu_client.py
+- Startup phase (one-time): apply routing foundation and baseline QoS.
+- Runtime phase (per RL step): apply optimization-only actions.
+
+Runtime state and actions
+
+- State: 6D normalized vector
+  - latency
+  - packet_loss
+  - throughput
+  - main_link_util
+  - backup_link_util
+  - failover_active
+- Actions: 4 discrete controls
+  - 0 do_nothing
+  - 1 update_queue
+  - 2 failover
+  - 3 reroute
+
+Core modules
+
+1. ai_layer/network_setup/network_initializer.py
+- Runs one-time startup setup for routing + baseline QoS from prod.json.
+
+2. ai_layer/network_interface/ryu_client.py
 - HTTP client with retry/error handling.
-- Telemetry:
+- Telemetry endpoints:
   - GET /links/utilization
   - GET /latency/{src}/{dst}
-- Actions:
-  - Queue/rate-limit REST calls used by the action translator.
+- Setup/action endpoints:
+  - PUT /v1.0/conf/switches/{switch_id}/ovsdb_addr
+  - POST /router/{switch_id}
+  - POST /qos/queue/{switch_id}
+  - POST /qos/rules/{switch_id}
 
-2. ai_layer/network_interface/telemetry_parser.py
-- Converts raw telemetry JSON into normalized 12D state:
-  [u_ran_agg, u_agg_core, u_core_sp1, u_core_sp2, u_sp1_lf1, u_sp2_lf1,
-   latency, packet_loss, traffic, svc_urllc, svc_embb, svc_mmtc]
+3. ai_layer/network_interface/telemetry_parser.py
+- Converts live telemetry to 6D operational state.
 
-3. ai_layer/network_interface/action_translator.py
-- Maps action ID (0-4) to concrete Ryu QoS/flow operations.
+4. ai_layer/network_interface/action_translator.py
+- Maps runtime action ID to concrete Ryu API calls.
 - Returns ActionResult(success, message, metadata).
 
-4. ai_layer/environments/sdn_env.py
-- Live Gymnasium environment against real Ryu + Mininet traffic.
-- step(action): execute action -> wait stabilization_delay -> collect telemetry -> compute reward.
+5. ai_layer/environments/sdn_env.py
+- Live Gymnasium environment with stabilization delay and optional reset endpoint call.
 
-5. ai_layer/utils/reward.py
-- Service-intent-aware reward with decomposed components.
-- Supports anti-collapse terms (action repeat penalty, outcome improvement bonus).
+6. ai_layer/utils/reward.py
+- Operational QoS reward with decomposed components.
 
-6. ai_layer/models/q_network.py
-- Q-network MLP: state_dim -> 64 -> 64 -> action_dim.
-
-7. ai_layer/agent/replay_buffer.py
-- Experience replay buffer with random minibatch sampling.
-
-8. ai_layer/agent/dqn_agent.py
-- DQN policy/target networks, epsilon-greedy, Bellman update, target sync, gradient clipping.
-
-9. train.py
-- Config-driven training loop, warmup gating, checkpoints, optional seed/model path overrides.
-
-10. evaluate.py
-- Greedy DQN evaluation plus baseline comparison (random, do_nothing).
-- Emits metrics JSON (action mix, switch rate, latency/loss proxies, reward-component shares).
-
-11. run_reward_alignment_experiment.py
-- Multi-seed train/evaluate runner and consolidated acceptance report.
-
-12. clint_test.py
-- Integration smoke test for telemetry parsing, action translation, and live environment stepping.
-
-Live data flow
-
-Ryu telemetry endpoints -> ryu_client -> telemetry_parser -> 12D state -> DQN action ->
-action_translator -> Ryu control endpoints -> stabilization delay -> next telemetry -> reward.
-
-Repository layout
-
-ai_layer/
-  network_interface/
-    ryu_client.py
-    telemetry_parser.py
-    action_translator.py
-  environments/
-    sdn_env.py
-  agent/
-    dqn_agent.py
-    replay_buffer.py
-  models/
-    q_network.py
-  training/
-    trainer.py
-  utils/
-    reward.py
-    config.py
-train.py
-evaluate.py
-run_reward_alignment_experiment.py
-clint_test.py
-prod.json
-INTEGRATION_NOTES.md
+7. train.py / evaluate.py / clint_test.py
+- Config-driven train/eval/smoke flows with optional startup setup call.
 
 Quick start
 
 1. Install dependencies
    pip install -r requirements.txt
 
-2. Validate live controller connectivity
+2. Run one-time startup setup
+   python setup_network.py --config prod.json
+
+3. Run smoke test
    python clint_test.py
 
-3. Evaluate a trained model
-   python evaluate.py --config prod.json --model-path models/dqn_model.pth
-
-4. Train on live environment
+4. Train
    python train.py --config prod.json --model-path models/dqn_model_live.pth
+
+5. Evaluate
+   python evaluate.py --config prod.json --model-path models/dqn_model_live.pth

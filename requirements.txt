@@ -1,4 +1,4 @@
-certifi==2026.2.25
+﻿certifi==2026.2.25
 charset-normalizer==3.4.7
 cloudpickle==3.1.2
 Farama-Notifications==0.0.4

@@ -34,7 +34,7 @@ class RyuClient:
     #  Internal helpers
     # ------------------------------------------------------------------ #
 
-    def _request(self, method: str, path: str, json_body: dict = None) -> dict:
+    def _request(self, method: str, path: str, json_body=None) -> dict:
         """Send an HTTP request with retry logic.
 
         Returns the parsed JSON response body, or an empty dict on 204/no-content.
@@ -50,7 +50,11 @@ class RyuClient:
 
                 if resp.status_code == 204 or not resp.content:
                     return {}
-                return resp.json()
+                try:
+                    return resp.json()
+                except ValueError:
+                    # Some controller apps return plain text for successful writes.
+                    return {"raw": resp.text}
 
             except requests.ConnectionError as exc:
                 logger.warning("Connection failed (attempt %d/%d): %s", attempt, self.retries, exc)
@@ -68,9 +72,6 @@ class RyuClient:
                 raise RyuResponseError(
                     f"{method} {url} returned {resp.status_code}: {resp.text}"
                 ) from exc
-
-            except ValueError as exc:
-                raise RyuResponseError(f"Invalid JSON from {url}") from exc
 
     # ------------------------------------------------------------------ #
     #  GET endpoints – telemetry
@@ -97,7 +98,7 @@ class RyuClient:
         return self._request("GET", f"/latency/{src}/{dst}")
 
     # ------------------------------------------------------------------ #
-    #  POST endpoints – actions
+    #  POST endpoints – actions and setup
     # ------------------------------------------------------------------ #
 
     def install_flow(self, dpid: str, flow_rule: dict) -> dict:
@@ -128,6 +129,36 @@ class RyuClient:
     def post_qos_rule(self, switch_id: str, rule: dict) -> dict:
         """POST /qos/rules/{switch_id}  →  add a QoS routing rule."""
         return self._request("POST", f"/qos/rules/{switch_id}", json_body=rule)
+
+    def set_switch_ovsdb_addr(self, switch_id: str, ovsdb_addr: str) -> dict:
+        """PUT /v1.0/conf/switches/{switch_id}/ovsdb_addr."""
+        return self._request(
+            "PUT",
+            f"/v1.0/conf/switches/{switch_id}/ovsdb_addr",
+            json_body=ovsdb_addr,
+        )
+
+    def post_router_entry(self, switch_id: str, payload: dict) -> dict:
+        """POST /router/{switch_id} with address/route/default-gateway payload."""
+        return self._request("POST", f"/router/{switch_id}", json_body=payload)
+
+    def add_router_address(self, switch_id: str, address_cidr: str) -> dict:
+        """POST router address assignment."""
+        return self.post_router_entry(switch_id, {"address": address_cidr})
+
+    def add_router_route(self, switch_id: str, destination_cidr: str, gateway_ip: str) -> dict:
+        """POST static route assignment."""
+        return self.post_router_entry(
+            switch_id,
+            {
+                "destination": destination_cidr,
+                "gateway": gateway_ip,
+            },
+        )
+
+    def set_router_default_gateway(self, switch_id: str, gateway_ip: str) -> dict:
+        """POST default gateway assignment."""
+        return self.post_router_entry(switch_id, {"gateway": gateway_ip})
 
     def reset_network(self) -> dict:
         """POST /network/reset  →  reset network state."""

@@ -1,15 +1,15 @@
 """
-SDN Gymnasium Environment for the updated telemetry model.
+SDN Gymnasium Environment for the routing-first optimization pipeline.
 
-Observation: np.array of 12 floats in [0, 1]
-Action:      Discrete(5)
+Observation: np.array of 6 floats in [0, 1]
+Action:      Discrete(4)
 
 step() cycle:
-    1. Execute action via ActionTranslator
+    1. Execute runtime optimization action
     2. Wait stabilization_delay seconds
     3. Collect /links/utilization + /latency/{src}/{dst}
-    4. Parse telemetry into 12-dim state via TelemetryParser
-    5. Compute service-aware reward
+    4. Parse telemetry into 6D state
+    5. Compute operational reward
 """
 
 import logging
@@ -40,20 +40,27 @@ class SDNEnv(gym.Env):
         net_cfg = env_cfg["network"]
         mon_cfg = env_cfg.get("monitoring", {})
         main_pair = mon_cfg.get("main_pair", {})
+        episode_cfg = env_cfg.get("episode", {})
 
-        self.stabilization_delay = net_cfg["stabilization_delay_seconds"]
-        self.max_steps = env_cfg["episode"]["max_steps"]
-        self.active_service = mon_cfg.get("active_service", "URLLC")
+        self.stabilization_delay = float(net_cfg.get("stabilization_delay_seconds", 2.0))
+        self.max_steps = int(episode_cfg.get("max_steps", 50))
+        self.call_network_reset_on_reset = bool(episode_cfg.get("call_network_reset_on_reset", False))
+
         self.latency_src = main_pair.get("src", "G6_D1")
         self.latency_dst = main_pair.get("dst", "URLLC")
+        self.failover_active = False
 
         self.client = RyuClient(env_cfg["ryu_controller"])
         self.parser = TelemetryParser(
-            link_capacity_mbps=net_cfg.get("link_capacity_mbps", 100.0),
-            latency_cap_ms=mon_cfg.get("latency_cap_ms", 200.0),
+            main_link_capacity_mbps=net_cfg.get("main_link_capacity_mbps", 20.0),
+            backup_link_capacity_mbps=net_cfg.get("backup_link_capacity_mbps", 10.0),
+            latency_min_ms=mon_cfg.get("latency_min_ms", 10.0),
+            latency_max_ms=mon_cfg.get("latency_max_ms", 80.0),
+            packet_loss_max_percent=mon_cfg.get("packet_loss_max_percent", 5.0),
         )
         self.translator = ActionTranslator(self.client, config)
         self.reward_cfg = config.get("reward_function", None)
+
         repeat_cfg = self.reward_cfg.get("components", {}).get("action_repeat_penalty", {}) if self.reward_cfg else {}
         self.repeat_penalty_weight = (
             float(repeat_cfg.get("weight", 0.0)) if bool(repeat_cfg.get("enabled", False)) else 0.0
@@ -64,13 +71,19 @@ class SDNEnv(gym.Env):
         )
         self.outcome_bonus_max = float(outcome_cfg.get("max_bonus", 0.2)) if outcome_cfg else 0.2
 
+        state_dim = int(env_cfg.get("state_space", {}).get("dimension", 6))
+        action_dim = int(env_cfg.get("action_space", {}).get("dimension", 4))
+
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(12,), dtype=np.float32
+            low=0.0,
+            high=1.0,
+            shape=(state_dim,),
+            dtype=np.float32,
         )
-        self.action_space = spaces.Discrete(5)
+        self.action_space = spaces.Discrete(action_dim)
 
         self._current_step = 0
-        self._state = np.zeros(12, dtype=np.float32)
+        self._state = np.zeros(state_dim, dtype=np.float32)
         self._last_action = None
 
     def reset(self, seed=None, options=None):
@@ -78,27 +91,33 @@ class SDNEnv(gym.Env):
         self._current_step = 0
         self._last_action = None
 
-        if options and "service_type" in options:
-            self.active_service = str(options["service_type"])
+        if options and "failover_active" in options:
+            self.failover_active = bool(options["failover_active"])
 
-        try:
-            self.client.reset_network()
-        except Exception:
-            logger.debug("Network reset not available, continuing")
+        if self.call_network_reset_on_reset:
+            try:
+                self.client.reset_network()
+            except Exception:
+                logger.debug("Network reset endpoint unavailable, continuing without reset")
 
         time.sleep(self.stabilization_delay)
         self._state = self._observe()
 
-        return self._state, {"service_type": self.active_service}
+        return self._state, {"failover_active": self.failover_active}
 
     def step(self, action: int):
-        prev_congestion = float(np.max(self._state[:6]))
+        prev_congestion = float(max(self._state[3], self._state[4]))
+
         result = self.translator.execute(action)
         if not result.success:
             logger.warning("Action %d failed: %s", action, result.message)
 
+        if result.success and "failover_active" in result.metadata:
+            self.failover_active = bool(result.metadata["failover_active"])
+
         time.sleep(self.stabilization_delay)
         self._state = self._observe()
+
         reward_details = compute_reward_details(self._state, self.reward_cfg)
 
         repeat_penalty = 0.0
@@ -106,8 +125,8 @@ class SDNEnv(gym.Env):
             repeat_penalty = -self.repeat_penalty_weight
 
         outcome_bonus = 0.0
-        post_congestion = float(np.max(self._state[:6]))
-        if self.outcome_bonus_weight > 0.0 and action in (1, 2):
+        post_congestion = float(max(self._state[3], self._state[4]))
+        if self.outcome_bonus_weight > 0.0 and action in (1, 2, 3):
             improvement = max(0.0, prev_congestion - post_congestion)
             outcome_bonus = min(self.outcome_bonus_max, improvement * self.outcome_bonus_weight)
 
@@ -117,6 +136,7 @@ class SDNEnv(gym.Env):
         if self.reward_cfg is not None:
             clip_lo, clip_hi = self.reward_cfg.get("normalization", {}).get("clip_range", [clip_lo, clip_hi])
         reward = float(np.clip(reward, clip_lo, clip_hi))
+
         reward_details["action_repeat_penalty"] = repeat_penalty
         reward_details["outcome_improvement_bonus"] = outcome_bonus
         reward_details["total"] = reward
@@ -128,9 +148,10 @@ class SDNEnv(gym.Env):
 
         info = {
             "step": self._current_step,
-            "service_type": self.active_service,
+            "failover_active": self.failover_active,
             "action_name": result.action_name,
             "action_success": result.success,
+            "action_metadata": result.metadata,
             "reward": reward,
             "reward_components": reward_details,
         }
@@ -138,14 +159,21 @@ class SDNEnv(gym.Env):
 
     def render(self):
         labels = [
-            "u_ran_agg", "u_agg_core", "u_core_sp1", "u_core_sp2",
-            "u_sp1_lf1", "u_sp2_lf1", "lat", "loss", "traffic",
-            "svc_u", "svc_e", "svc_m",
+            "latency",
+            "loss",
+            "throughput",
+            "u_main",
+            "u_backup",
+            "failover",
         ]
-        parts = [f"{l}={v:.3f}" for l, v in zip(labels, self._state)]
+        parts = [f"{label}={value:.3f}" for label, value in zip(labels, self._state)]
         print(f"[Step {self._current_step:3d}] {' | '.join(parts)}")
 
     def _observe(self) -> np.ndarray:
         links = self.client.get_link_utilization()
         latency = self.client.get_latency(self.latency_src, self.latency_dst)
-        return self.parser.build_state(links, latency, self.active_service)
+        return self.parser.build_state(
+            link_util_response=links,
+            latency_response=latency,
+            failover_active=self.failover_active,
+        )
