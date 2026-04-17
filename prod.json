@@ -4,7 +4,7 @@
     "description": "Reinforcement Learning driven Software-Defined Network optimization",
     "mode": "production",
     "ryu_controller": {
-      "base_url": "http://localhost:8080",
+      "base_url": "http://172.17.0.2:8080",
       "timeout_seconds": 5,
       "retry_attempts": 3,
       "retry_delay_seconds": 1
