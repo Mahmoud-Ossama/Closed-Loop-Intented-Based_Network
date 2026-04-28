@@ -13,7 +13,7 @@
       "switch_dpid": "0000000000000030",
       "main_link_capacity_mbps": 20.0,
       "backup_link_capacity_mbps": 10.0,
-      "stabilization_delay_seconds": 2.0,
+      "stabilization_delay_seconds": 1.0,
       "num_ports": 3,
       "topology": {
         "main_path": ["core", "sp1", "lf1"],
@@ -491,7 +491,7 @@
       }
     },
     "episode": {
-      "max_steps": 50,
+      "max_steps": 15,
       "timeout_seconds": 300,
       "call_network_reset_on_reset": false
     }
@@ -525,10 +525,10 @@
     "loss_function": "MSE"
   },
   "training": {
-    "num_episodes": 1000,
-    "warmup_steps": 1000,
-    "evaluation_frequency": 50,
-    "save_frequency": 100,
+    "num_episodes": 100,
+    "warmup_steps": 200,
+    "evaluation_frequency": 10,
+    "save_frequency": 25,
     "run_startup_setup": true,
     "early_stopping": {
       "enabled": true,
