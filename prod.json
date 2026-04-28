@@ -5,8 +5,8 @@
     "mode": "production",
     "ryu_controller": {
       "base_url": "http://172.17.0.2:8080",
-      "timeout_seconds": 5,
-      "retry_attempts": 3,
+      "timeout_seconds": 15,
+      "retry_attempts": 5,
       "retry_delay_seconds": 1
     },
     "network": {

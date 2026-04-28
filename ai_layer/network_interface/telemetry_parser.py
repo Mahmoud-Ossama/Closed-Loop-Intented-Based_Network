@@ -50,10 +50,20 @@ class TelemetryParser:
                 result[link] = tx_mbps
         return result
 
+    @staticmethod
+    def _safe_float(value, default: float) -> float:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     def parse_latency(self, response: dict) -> Dict[str, float]:
         """Parse /latency/{src}/{dst} response into numeric values."""
-        latency_ms = float(response.get("latency_ms", 0.0))
-        loss_percent = float(response.get("packet_loss_percent", 0.0))
+        # Treat missing latency/loss as worst-case to avoid over-optimistic rewards.
+        latency_ms = self._safe_float(response.get("latency_ms"), self.latency_max_ms)
+        loss_percent = self._safe_float(response.get("packet_loss_percent"), self.packet_loss_max_percent)
         return {
             "latency_ms": latency_ms,
             "packet_loss_percent": loss_percent,
