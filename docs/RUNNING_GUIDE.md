@@ -100,7 +100,13 @@ curl http://172.17.0.2:8080/latency/G6_D1/URLLC
 # 5. One-time network setup (routing + baseline QoS). Run on a QUIET network:
 python setup_network.py --config prod.json
 
-# 6. Start traffic (inside Mininet — see traffic_runner.py, or iperf via scripts/mn.sh).
+# 6. Start traffic. traffic_runner.py's start_traffic() needs Mininet's `net`
+#    object and only works from inside `mininet>`; with the headless launcher
+#    there is no CLI, so use this instead — same host pairs, ports and default
+#    bandwidths (6M + 5M + 3M = 14M, fits the 20 Mbps main path).
+./scripts/start_traffic.sh                 # 1800s
+./scripts/start_traffic.sh status          # per-flow iperf log tails
+./scripts/start_traffic.sh stop
 
 # 7. Verify ARP resolved across the fabric. This MUST succeed before step 8:
 ./scripts/mn.sh host G6_D1 ping -c 3 20.0.0.1

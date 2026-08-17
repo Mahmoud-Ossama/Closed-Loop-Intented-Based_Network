@@ -33,8 +33,11 @@ python evaluate.py --config prod.json --skip-setup --metrics-path logs/eval.json
 # Run reward-alignment batch experiment (multi-seed train+eval)
 python run_reward_alignment_experiment.py   # writes configs/reward_alignment_exp.json
 
-# Traffic generation (run inside Mininet)
-python traffic_runner.py
+# Traffic generation
+./scripts/start_traffic.sh          # headless: 3 UDP iperf flows, 6M+5M+3M
+./scripts/start_traffic.sh status
+./scripts/start_traffic.sh stop
+python traffic_runner.py            # only from inside `mininet>` (needs `net`)
 ```
 
 Fabric startup (inside the Mininet/Ryu container, BEFORE `ryu-manager` — see
