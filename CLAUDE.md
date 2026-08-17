@@ -37,6 +37,18 @@ python run_reward_alignment_experiment.py   # writes configs/reward_alignment_ex
 python traffic_runner.py
 ```
 
+Fabric startup (inside the Mininet/Ryu container, BEFORE `ryu-manager` — see
+`docs/RUNNING_GUIDE.md` §3). `run_topo.py` replaces `mn --custom ... --topo sixg`:
+it holds the network up headlessly instead of opening a CLI, disables IPv6 before
+the fabric forwards anything, and installs each host's default gateway. Skipping
+the IPv6 step seeds a self-sustaining broadcast storm (§8.14).
+```bash
+docker exec <container> mn -c
+docker cp scripts/topo_6g.py  <container>:/root/
+docker cp scripts/run_topo.py <container>:/root/
+docker exec -d <container> sh -c 'python /root/run_topo.py >> /tmp/mn.log 2>&1'
+```
+
 Quick controller health checks:
 ```bash
 curl http://<controller_ip>:8080/stats/switches
@@ -120,7 +132,9 @@ Episodes are **truncated** at `environment.episode.max_steps`; `terminated` is a
 ### Known failure modes
 
 - **Controller unreachable**: update `environment.ryu_controller.base_url` in `prod.json` (default `http://172.17.0.2:8080`).
-- **Latency returns null**: add default routes in Mininet host namespaces (`mnexec -a <pid> ip route add default via <gw>`).
+- **Latency returns null**: add default routes in Mininet host namespaces (`mnexec -a <pid> ip route add default via <gw>`); `scripts/run_topo.py` now does this at startup. `/latency` also carries an `error` field — non-null means the probe itself failed (unknown host, `pgrep` miss), null with `packet_loss_percent: "100"` means the ping ran and nothing answered.
+- **Every link pinned near capacity on an idle fabric**: IPv6 router-solicitation storm looping through `qos_rest_router`'s `priority=0 actions=NORMAL` rule. Self-sustaining once seeded; IPv6 must be disabled before Ryu starts. See `docs/RUNNING_GUIDE.md` §8.14.
+- **Lab gone after a VM reboot**: OVS bridges survive in OVSDB but every veth and host namespace does not, so bridges show `could not open network device ... (No such device)`. Docker's `always` policy restarts the container, which is not a rebuild — redo §3 from `mn -c`.
 - **qos_rest_router KeyError**: Mininet was started after Ryu — restart Ryu after Mininet is fully up.
 - **`Address already in use` on ryu-manager start**: a stale controller still holds port 8080. Clear it before restarting: `fuser -k 8080/tcp` (or `kill $(lsof -t -i:8080)`), confirm with `ss -lntp | grep 8080`, then start `ryu-manager`. A Ryu restart also wipes the routing/QoS baseline — re-run `setup_network.py` (training does this automatically on reconnect).
 - **Controller dies mid-training**: `train.py` saves `models/train_state.pth` every episode and waits `reconnect_max_wait_seconds` (default 180s) for the controller to return, re-applying startup setup before continuing. If it stays down, resume with `python train.py --config prod.json --resume models/train_state.pth`. Capture the cause by running the controller with its log teed to a file — see the full invocation in `docs/RUNNING_GUIDE.md` §3 (use `tee -a`; bare `tee` truncates the log on every restart).

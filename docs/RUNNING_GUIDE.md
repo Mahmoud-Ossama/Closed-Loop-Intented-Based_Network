@@ -63,11 +63,20 @@ Key AI-layer pins (`requirements.txt`): `torch==2.11.0`, `gymnasium==1.2.3`, `nu
 
 ## 3. Startup order (follow exactly)
 
-Order matters. Starting Ryu before Mininet causes `qos_rest_router` `KeyError` crashes.
+Order matters. Starting Ryu before Mininet causes `qos_rest_router` `KeyError` crashes,
+and starting Ryu before IPv6 is disabled seeds a permanent broadcast storm (§8.14).
 
 ```bash
-# 1. Start Mininet FIRST and let the topology fully come up.
-#    Wait until all switches/hosts are listed and pingable.
+# 1. Start Mininet FIRST and let the topology fully come up. Use the headless
+#    launcher, which is `mn --custom ... --topo sixg` plus the two steps that
+#    are mandatory and easy to forget: it disables IPv6 before the fabric
+#    forwards anything, and installs each host's default gateway.
+docker exec <container> mn -c
+docker cp scripts/topo_6g.py   <container>:/root/
+docker cp scripts/run_topo.py  <container>:/root/
+docker exec -d <container> sh -c 'python /root/run_topo.py >> /tmp/mn.log 2>&1'
+#    Wait for "*** fabric up, holding" in /tmp/mn.log (~20s), then confirm
+#    6 switches and 8 hosts are listed.
 
 # 2. Copy the custom apps into the container (ryu-manager loads them by bare
 #    relative path, so they must sit in its working directory, /root):
@@ -500,6 +509,50 @@ unambiguous:
 ```
 `cookie=0xa17e priority=100 → output:3` present means failover is active; the base
 `cookie=0x20000` packet counter freezes while it is, and resumes after `reroute`.
+
+### 8.14 Every link pinned near capacity on an idle fabric (IPv6 broadcast storm)
+
+**Symptom:** on a fabric with no traffic at all, `/links/utilization` reports every
+spine link at ~9.9 Mbps and `agg -> RAN` at ~19.9 Mbps, and it barely responds to
+real traffic. Cross-fabric pings fail or lose packets, hosts sit at `FAILED` in
+`ip neigh`, and same-subnet pings (`mMTC -> eMBB`) fail too.
+
+**Measured on 2026-08-17:** 17,835 pkt/s and 10.0 Mbps inbound on `core-eth2`
+alone; a 5-second protocol count on that link gave `IPv6=175256, ARP=0, IPv4=0`.
+
+**Cause:** every veth emits IPv6 router solicitations to `ff02::2`. Those are not
+IPv4, so they miss every specific flow and fall through `qos_rest_router`'s
+`table=1, priority=0, actions=NORMAL` rule, which L2-floods them. The fabric has a
+physical loop (core-sp1-lf1-sp2-core), there is no spanning tree, and flooding
+never decrements the IPv6 hop limit — so the solicitations circulate and replicate
+until both paths sit at link capacity. The `NORMAL` rule belongs to
+`qos_rest_router`, not to either app in `ryu_apps/`, so it cannot simply be removed.
+
+**The storm is self-sustaining once seeded.** Disabling IPv6 after the fact does
+*not* clear it — verified: it stayed at 17,835 pkt/s afterwards. IPv6 must be off
+*before* the fabric starts forwarding, which means while `ryu-manager` is still
+down and the switches are dropping everything in `fail_mode=secure`.
+
+**Fix:** `scripts/run_topo.py` does this as part of startup, so following §3 in
+order avoids the problem entirely. To recover a fabric that is already storming,
+the whole sequence has to be redone in order:
+
+```bash
+docker exec <container> pkill -f ryu-manager      # Ryu down FIRST
+docker exec <container> pkill -f run_topo.py
+docker exec <container> mn -c
+docker exec -d <container> sh -c 'python /root/run_topo.py >> /tmp/mn.log 2>&1'
+# ... then §3 step 2 onward. Re-run setup_network.py: a Ryu restart wipes it.
+```
+
+Confirm it worked — on an idle fabric all 12 links must read `0.0`, and the
+`NORMAL` rule's counter must stay at zero:
+```bash
+./scripts/mn.sh sw ovs-ofctl -O OpenFlow13 dump-flows core | grep 'table=1.*priority=0'
+```
+
+`scripts/disable_ipv6.sh` applies the same sysctls to an already-running fabric.
+It is only useful *before* Ryu starts; against a seeded storm it is a no-op.
 
 ---
 
