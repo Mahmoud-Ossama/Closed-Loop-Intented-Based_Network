@@ -65,6 +65,33 @@ MMTC_BW="${4:-3M}"
 
 kill_iperf
 
+# Warm ARP BEFORE any iperf. qos_rest_router installs routes as packet-in stubs
+# and suspends packets at the controller while it floods an ARP request for the
+# next hop. Pointing 14 Mbps at unresolved destinations turns every packet into
+# a packet-in and wedges the router -- it then stops answering ARP for every
+# switch, stopping traffic does not recover it, and only a Ryu restart (plus a
+# re-run of setup_network.py) clears it. See RUNNING_GUIDE.md §8.15.
+echo "Warming ARP (quiet network) before starting iperf..."
+warm_failed=0
+for entry in $CLIENTS; do
+    host="${entry%%:*}"
+    rest="${entry#*:}"
+    dst="${rest%%:*}"
+    if "$MN" host "$host" ping -c 3 -W 2 "$dst" >/dev/null 2>&1; then
+        printf "  %-10s -> %-10s ok\n" "$host" "$dst"
+    else
+        printf "  %-10s -> %-10s UNRESOLVED\n" "$host" "$dst"
+        warm_failed=1
+    fi
+done
+
+if [ "$warm_failed" -ne 0 ]; then
+    echo "Error: ARP did not resolve for every flow; refusing to start traffic." >&2
+    echo "Starting iperf now would wedge qos_rest_router (see §8.15). Fix" >&2
+    echo "connectivity first — a Ryu restart + setup_network.py is the usual cure." >&2
+    exit 1
+fi
+
 for entry in $SERVERS; do
     host="${entry%%:*}"
     port="${entry##*:}"

@@ -40,6 +40,10 @@ from topo_6g import SixGTopo
 
 _running = [True]
 
+# Upper bound on net.stop(). Generous for a healthy teardown (a few seconds),
+# short enough that a wedged one cannot outlive a rebuild.
+STOP_TIMEOUT_S = 60
+
 
 def _sysctl_root(setting):
     """Apply a sysctl in the container's root namespace (where switch veths live)."""
@@ -49,6 +53,41 @@ def _sysctl_root(setting):
 def _stop(signum, _frame):
     info("*** caught signal %d, stopping network\n" % signum)
     _running[0] = False
+
+
+class _StopTimeout(Exception):
+    pass
+
+
+def _stop_net(net, timeout=STOP_TIMEOUT_S):
+    """net.stop(), but bounded so a wedged teardown cannot hang the process.
+
+    If the fabric was destroyed underneath us -- someone ran `mn -c`, or started
+    a second Mininet -- net.stop() blocks indefinitely trying to tear down veths
+    and namespaces that no longer exist, and the process then ignores SIGTERM and
+    needs a SIGKILL. Observed on 2026-08-18: this held a dead network for 20+
+    minutes alongside a live one, which is dangerous because a late-completing
+    net.stop() can delete the *replacement* fabric's bridges.
+
+    SIGALRM interrupts the blocking call. Teardown may be left half-finished, so
+    say so plainly: `mn -c` is the cleanup.
+    """
+    def _on_alarm(_signum, _frame):
+        raise _StopTimeout()
+
+    previous = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(timeout)
+    try:
+        net.stop()
+        info("*** network stopped\n")
+    except _StopTimeout:
+        info("*** net.stop() still running after %ds -- abandoning teardown.\n"
+             "*** Leftover veths/namespaces are likely; run `mn -c`.\n" % timeout)
+    except Exception as exc:  # teardown must never block process exit
+        info("*** net.stop() failed: %s\n*** Run `mn -c`.\n" % exc)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def main():
@@ -109,8 +148,7 @@ def main():
         while _running[0]:
             time.sleep(1)
     finally:
-        net.stop()
-        info("*** network stopped\n")
+        _stop_net(net)
 
     return 0
 

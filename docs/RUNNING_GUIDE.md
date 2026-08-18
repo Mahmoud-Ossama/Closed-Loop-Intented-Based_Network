@@ -100,16 +100,23 @@ curl http://172.17.0.2:8080/latency/G6_D1/URLLC
 # 5. One-time network setup (routing + baseline QoS). Run on a QUIET network:
 python setup_network.py --config prod.json
 
-# 6. Start traffic. traffic_runner.py's start_traffic() needs Mininet's `net`
+# 6. Resolve ARP while the network is still QUIET. This MUST come before
+#    traffic — see §8.15. Every pair, not just one:
+./scripts/mn.sh host G6_D1    ping -c 3 20.0.0.1
+./scripts/mn.sh host G6_D2    ping -c 3 20.0.0.2
+./scripts/mn.sh host G6_IOT_D ping -c 3 20.0.0.3
+./scripts/mn.sh host MNR_D    ping -c 3 18.0.0.1
+#    All four must report 0% loss. If any does not, fix that before continuing;
+#    starting traffic now would wedge the controller.
+
+# 7. Start traffic. traffic_runner.py's start_traffic() needs Mininet's `net`
 #    object and only works from inside `mininet>`; with the headless launcher
 #    there is no CLI, so use this instead — same host pairs, ports and default
-#    bandwidths (6M + 5M + 3M = 14M, fits the 20 Mbps main path).
+#    bandwidths (6M + 5M + 3M = 14M, fits the 20 Mbps main path). It repeats the
+#    step-6 warmup itself, so the ordering holds even if step 6 was skipped.
 ./scripts/start_traffic.sh                 # 1800s
 ./scripts/start_traffic.sh status          # per-flow iperf log tails
 ./scripts/start_traffic.sh stop
-
-# 7. Verify ARP resolved across the fabric. This MUST succeed before step 8:
-./scripts/mn.sh host G6_D1 ping -c 3 20.0.0.1
 
 # 8. Capture next-hop L2 rewrites. Requires steps 6-7: qos_rest_router installs
 #    routes as packet-in stubs and only writes the eth_src/eth_dst/output flow
@@ -123,10 +130,12 @@ python clint_test.py
 python train.py --config prod.json --model-path models/dqn_model_live.pth
 ```
 
-**Steps 5→8 order is not optional.** Setup must run on a quiet network; capture
+**Steps 5→8 order is not optional.** Setup must run on a quiet network, ARP must
+be resolved while it is *still* quiet, and only then does traffic start; capture
 must run on a busy one. Skipping step 8 leaves `models/next_hops.json` absent and
 every `failover` action fails at runtime with
-`No next-hop rewrite captured for 48:14.0.0.2`.
+`No next-hop rewrite captured for 48:14.0.0.2`. Starting traffic before step 6
+wedges `qos_rest_router` and costs a controller restart — §8.15.
 
 **Always run long training inside `tmux` or `screen`** — an SSH disconnect kills it otherwise.
 
@@ -559,6 +568,47 @@ Confirm it worked — on an idle fabric all 12 links must read `0.0`, and the
 
 `scripts/disable_ipv6.sh` applies the same sysctls to an already-running fabric.
 It is only useful *before* Ryu starts; against a seeded storm it is a no-op.
+
+### 8.15 ARP stops resolving fabric-wide after traffic starts
+
+**Symptom:** hosts sit at `INCOMPLETE` in `ip neigh` and every ping fails 100%,
+including a host pinging *its own default gateway*, and including same-subnet
+pairs. `/latency` returns `latency_ms: null` with `packet_loss_percent: "100"`.
+Meanwhile already-established iperf flows keep running fine, because their flows
+were installed before the wedge.
+
+**Cause:** `qos_rest_router` installs routes as packet-in stubs. A packet to an
+unresolved next hop is *suspended* at the controller while it floods an ARP
+request. Starting iperf before ARP is resolved points 14 Mbps at unresolved
+destinations, so every packet becomes a packet-in and the router drowns in the
+suspend/flood/re-resolve cycle:
+
+```
+[RT][INFO] switch_id=...0050: Receive IP packet from [10.0.0.2] to an internal host [20.0.0.2].
+[RT][INFO] switch_id=...0050: Send ARP request (flood)
+[RT][INFO] switch_id=...0050: Send suspend packet to [20.0.0.2].
+```
+
+Once wedged it stops answering ARP for **every** switch, not just the one under
+load. Confirmed by measurement on 2026-08-18: ARP packet-ins were still arriving
+(`priority=1,arp actions=CONTROLLER` counter 447→452 during a ping) while
+`Send ARP reply` did not increment at all, and `tcpdump` on the host saw
+Requests and never a Reply. Ryu was healthy by every other measure — REST
+answering, all 6 switches connected, 6s CPU over 4 minutes.
+
+**Stopping traffic does not recover it.** The only fix is a Ryu restart, which
+also wipes the baseline, so `setup_network.py` must be re-run:
+
+```bash
+docker exec <container> pkill -f ryu-manager
+docker exec <container> ss -lntp | grep 8080     # must print nothing
+# ... restart per §3 step 3, then:
+python setup_network.py --config prod.json
+# THEN warm ARP on the quiet network (§3 step 6), and only then start traffic.
+```
+
+**Prevention:** follow §3's order. `scripts/start_traffic.sh` also warms ARP
+itself before launching iperf, so the ordering holds structurally.
 
 ---
 
